@@ -334,13 +334,6 @@ It depends on your needs. Weekly or monthly scraping is common for market monito
 ### Can I export to my database?
 Yes! Use Apify's API to integrate with your database or use webhooks to trigger data transfer automatically.
 
-## Related Actors
-
-- **Rightmove Property Scraper** - Extract property listings from Rightmove
-- **Zoopla Agent Scraper** - Extract agents from Zoopla
-- **OnTheMarket Scraper** - Scrape OnTheMarket listings
-- **Real Estate CRM Integration** - Connect scraped data to your CRM
-
 ## Keywords
 
 rightmove scraper, agent scraper uk, estate agents scraper, rightmove agent data, uk estate agents, letting agents scraper, agent listings scraper, agent contact scraper, rightmove api alternative, estate agent data, real estate automation, agent research tool, uk agent data, agent market data, rightmove crawler, estate agent extraction, agent database tool, real estate agents scraper

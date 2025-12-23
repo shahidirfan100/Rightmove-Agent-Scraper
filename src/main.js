@@ -261,22 +261,32 @@ const extractAgentDetails = ($, html, basicInfo = {}) => {
             if (orgJsonLd.description) agentData.description = orgJsonLd.description;
         }
 
-        // Extract full description
+        // Extract full description with specific Rightmove selector
         if (!agentData.description) {
-            const descSelectors = [
-                '[class*="description"]',
-                '[class*="about"]',
-                '[class*="profile"]',
-                'div[class*="text"] p',
-                'section p'
-            ];
-            for (const selector of descSelectors) {
-                const descEl = $(selector).first();
-                if (descEl.length) {
-                    const desc = cleanDescription(descEl.text());
-                    if (desc && desc.length > 50) {
-                        agentData.description = desc;
-                        break;
+            // Primary selector: exact Rightmove description class
+            const primaryDesc = $('div.branchInfo_description__NmvTq').first();
+            if (primaryDesc.length) {
+                agentData.description = cleanDescription(primaryDesc.text());
+            }
+
+            // Fallback selectors if primary not found
+            if (!agentData.description) {
+                const descSelectors = [
+                    'div[class*="branchInfo_description"]',
+                    '[class*="description"]',
+                    '[class*="about"]',
+                    '[class*="profile"]',
+                    'div[class*="text"] p',
+                    'section p'
+                ];
+                for (const selector of descSelectors) {
+                    const descEl = $(selector).first();
+                    if (descEl.length) {
+                        const desc = cleanDescription(descEl.text());
+                        if (desc && desc.length > 50) {
+                            agentData.description = desc;
+                            break;
+                        }
                     }
                 }
             }
