@@ -6,8 +6,8 @@
   "brandName": "",
   "branchType": "ALL",
   "collectAgentDetails": true,
-  "maxResults": 50,
-  "maxPages": 5,
+  "maxResults": 20,
+  "maxPages": 3,
   "proxyConfiguration": {
     "useApifyProxy": true
   }

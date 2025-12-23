@@ -56,6 +56,8 @@
           "address",
           "branchType",
           "description",
+          "descriptionSales",
+          "descriptionLetting",
           "propertiesForSale",
           "propertiesToLet",
           "teamMembers",
@@ -97,6 +99,14 @@
           },
           "description": {
             "label": "Description",
+            "format": "text"
+          },
+          "descriptionSales": {
+            "label": "About Sales",
+            "format": "text"
+          },
+          "descriptionLetting": {
+            "label": "About Letting",
             "format": "text"
           },
           "propertiesForSale": {

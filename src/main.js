@@ -264,25 +264,68 @@ const extractAgentDetails = ($, html, basicInfo = {}) => {
         // Extract full description with specific Rightmove selector
         if (!agentData.description) {
             // Primary selector: exact Rightmove description class
-            const primaryDesc = $('div.branchInfo_description__NmvTq').first();
+            const primaryDesc = $('div.branchInfo_description__NmvTq');
+
             if (primaryDesc.length) {
-                agentData.description = cleanDescription(primaryDesc.text());
+                // Extract complete text from the description container
+                // This gets all text including hidden "Read More" content
+                const fullDescription = cleanDescription(primaryDesc.text());
+
+                // Check if there are separate tabs for Sales and Letting
+                // Look for tab panels or separate description sections
+                const salesTab = $('[class*="sales"] div.branchInfo_description__NmvTq, [data-tab="sales"] div.branchInfo_description__NmvTq, [id*="sales"] div.branchInfo_description__NmvTq');
+                const lettingTab = $('[class*="letting"] div.branchInfo_description__NmvTq, [data-tab="letting"] div.branchInfo_description__NmvTq, [id*="letting"] div.branchInfo_description__NmvTq');
+
+                if (salesTab.length || lettingTab.length) {
+                    // Separate tabs exist - extract each
+                    if (salesTab.length) {
+                        agentData.descriptionSales = cleanDescription(salesTab.text());
+                    }
+                    if (lettingTab.length) {
+                        agentData.descriptionLetting = cleanDescription(lettingTab.text());
+                    }
+                } else {
+                    // No separate tabs - use the full description
+                    // Try to find all description instances (there might be multiple)
+                    const allDescriptions = $('div.branchInfo_description__NmvTq');
+                    if (allDescriptions.length > 1) {
+                        // Multiple descriptions found - likely one for sales, one for letting
+                        const descriptions = [];
+                        allDescriptions.each((i, el) => {
+                            const text = cleanDescription($(el).text());
+                            if (text && text.length > 50) {
+                                descriptions.push(text);
+                            }
+                        });
+
+                        if (descriptions.length >= 2) {
+                            // Assume first is sales, second is letting
+                            agentData.descriptionSales = descriptions[0];
+                            agentData.descriptionLetting = descriptions[1];
+                        } else if (descriptions.length === 1) {
+                            agentData.description = descriptions[0];
+                        }
+                    } else if (fullDescription) {
+                        // Single description container
+                        agentData.description = fullDescription;
+                    }
+                }
             }
 
             // Fallback selectors if primary not found
-            if (!agentData.description) {
+            if (!agentData.description && !agentData.descriptionSales && !agentData.descriptionLetting) {
                 const descSelectors = [
                     'div[class*="branchInfo_description"]',
-                    '[class*="description"]',
-                    '[class*="about"]',
-                    '[class*="profile"]',
-                    'div[class*="text"] p',
-                    'section p'
+                    '[class*="description"][class*="branch"]',
+                    '[class*="about"][class*="text"]',
+                    'div[class*="description"] p',
+                    'section[class*="about"] p',
+                    '[class*="profile"] p'
                 ];
                 for (const selector of descSelectors) {
-                    const descEl = $(selector).first();
-                    if (descEl.length) {
-                        const desc = cleanDescription(descEl.text());
+                    const descElements = $(selector);
+                    if (descElements.length) {
+                        const desc = cleanDescription(descElements.text());
                         if (desc && desc.length > 50) {
                             agentData.description = desc;
                             break;
