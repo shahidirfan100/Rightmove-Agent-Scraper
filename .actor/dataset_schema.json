@@ -1,0 +1,130 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "agentId",
+          "name",
+          "phone",
+          "branchType",
+          "address",
+          "url"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "agentId": {
+            "label": "Agent ID",
+            "format": "text"
+          },
+          "name": {
+            "label": "Agent Name",
+            "format": "text"
+          },
+          "phone": {
+            "label": "Phone",
+            "format": "text"
+          },
+          "branchType": {
+            "label": "Branch Type",
+            "format": "text"
+          },
+          "address": {
+            "label": "Address",
+            "format": "text"
+          },
+          "url": {
+            "label": "Agent URL",
+            "format": "link"
+          }
+        }
+      }
+    },
+    "detailed": {
+      "title": "Detailed View",
+      "transformation": {
+        "fields": [
+          "agentId",
+          "name",
+          "phone",
+          "email",
+          "website",
+          "address",
+          "branchType",
+          "description",
+          "propertiesForSale",
+          "propertiesToLet",
+          "teamMembers",
+          "servicesOffered",
+          "url",
+          "logo"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "agentId": {
+            "label": "Agent ID",
+            "format": "text"
+          },
+          "name": {
+            "label": "Agent Name",
+            "format": "text"
+          },
+          "phone": {
+            "label": "Phone",
+            "format": "text"
+          },
+          "email": {
+            "label": "Email",
+            "format": "text"
+          },
+          "website": {
+            "label": "Website",
+            "format": "link"
+          },
+          "address": {
+            "label": "Office Address",
+            "format": "text"
+          },
+          "branchType": {
+            "label": "Branch Type",
+            "format": "text"
+          },
+          "description": {
+            "label": "Description",
+            "format": "text"
+          },
+          "propertiesForSale": {
+            "label": "Properties for Sale",
+            "format": "number"
+          },
+          "propertiesToLet": {
+            "label": "Properties to Let",
+            "format": "number"
+          },
+          "teamMembers": {
+            "label": "Team Members",
+            "format": "number"
+          },
+          "servicesOffered": {
+            "label": "Services Offered",
+            "format": "array"
+          },
+          "url": {
+            "label": "Profile URL",
+            "format": "link"
+          },
+          "logo": {
+            "label": "Logo",
+            "format": "link"
+          }
+        }
+      }
+    }
+  }
+}

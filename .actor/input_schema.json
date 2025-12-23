@@ -1,0 +1,123 @@
+{
+  "title": "Rightmove Agent Scraper",
+  "description": "Extract UK estate agents and letting agents from Rightmove with comprehensive details including contact information, office addresses, property counts, and agent profiles.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "startUrl": {
+      "title": "Search URL",
+      "type": "string",
+      "description": "Rightmove agent search URL. Leave empty to use search parameters below.",
+      "editor": "textfield",
+      "example": "https://www.rightmove.co.uk/estate-agents/find.html?radius=0.0&locationIdentifier=REGION%5E87490&brandName=&branchType=ALL",
+      "prefill": "https://www.rightmove.co.uk/estate-agents/find.html?radius=0.0&locationIdentifier=REGION%5E87490&brandName=&branchType=ALL"
+    },
+    "searchLocation": {
+      "title": "Search Location",
+      "type": "string",
+      "description": "Location name to search for estate agents (e.g., 'London', 'Manchester', 'Birmingham')",
+      "editor": "textfield",
+      "example": "London",
+      "default": "London"
+    },
+    "locationIdentifier": {
+      "title": "Location Identifier",
+      "type": "string",
+      "description": "Rightmove location identifier (e.g., REGION^87490 for London). Leave empty to search by location name.",
+      "editor": "textfield",
+      "example": "REGION^87490"
+    },
+    "radius": {
+      "title": "Search Radius",
+      "type": "string",
+      "description": "Search radius from location in miles",
+      "editor": "select",
+      "enum": [
+        "0.0",
+        "0.25",
+        "0.5",
+        "1.0",
+        "3.0",
+        "5.0",
+        "10.0",
+        "15.0",
+        "20.0",
+        "30.0",
+        "40.0"
+      ],
+      "enumTitles": [
+        "This area only",
+        "Within 1/4 mile",
+        "Within 1/2 mile",
+        "Within 1 mile",
+        "Within 3 miles",
+        "Within 5 miles",
+        "Within 10 miles",
+        "Within 15 miles",
+        "Within 20 miles",
+        "Within 30 miles",
+        "Within 40 miles"
+      ],
+      "default": "0.0"
+    },
+    "brandName": {
+      "title": "Brand/Agent Name",
+      "type": "string",
+      "description": "Filter by specific agent brand name (optional, leave empty for all agents)",
+      "editor": "textfield",
+      "example": "Foxtons"
+    },
+    "branchType": {
+      "title": "Branch Type",
+      "type": "string",
+      "description": "Type of agent branches to search",
+      "editor": "select",
+      "enum": [
+        "ALL",
+        "SALES",
+        "LETTINGS"
+      ],
+      "enumTitles": [
+        "All Agents",
+        "Sales Only",
+        "Lettings Only"
+      ],
+      "default": "ALL"
+    },
+    "collectAgentDetails": {
+      "title": "Collect Full Agent Details",
+      "type": "boolean",
+      "description": "Visit each agent's profile page to extract complete information including full description, email, website, property counts, and services. Increases runtime but provides comprehensive data.",
+      "editor": "checkbox",
+      "default": true
+    },
+    "maxResults": {
+      "title": "Maximum Agents",
+      "type": "integer",
+      "description": "Maximum number of estate agents to collect (1-1000)",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 50,
+      "editor": "number"
+    },
+    "maxPages": {
+      "title": "Maximum Pages",
+      "type": "integer",
+      "description": "Maximum number of result pages to process (each page contains ~10 agents)",
+      "minimum": 1,
+      "maximum": 50,
+      "default": 5,
+      "editor": "number"
+    },
+    "proxyConfiguration": {
+      "title": "Proxy Configuration",
+      "type": "object",
+      "description": "Proxy settings for requests. Residential proxies recommended to avoid blocking.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true
+      }
+    }
+  },
+  "required": []
+}

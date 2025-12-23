@@ -1,0 +1,21 @@
+{
+  "actorSpecification": 1,
+  "name": "rightmove-agent-scraper",
+  "title": "Rightmove Agent Scraper",
+  "version": "1.0.0",
+  "buildTag": "latest",
+  "dockerfile": "./Dockerfile",
+  "readme": "./README.md",
+  "input": "./input_schema.json",
+  "output": "./output_schema.json",
+  "nodeJsVersion": "22",
+  "storages": {
+    "dataset": "./dataset_schema.json"
+  },
+  "categories": [
+    "REAL_ESTATE"
+  ],
+  "meta": {
+    "generatedBy": "GPT-5"
+  }
+}

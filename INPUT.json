@@ -1,0 +1,14 @@
+{
+  "startUrl": "https://www.rightmove.co.uk/estate-agents/find.html?radius=0.0&locationIdentifier=REGION^87490&brandName=&branchType=ALL",
+  "searchLocation": "London",
+  "locationIdentifier": "REGION^87490",
+  "radius": "0.0",
+  "brandName": "",
+  "branchType": "ALL",
+  "collectAgentDetails": true,
+  "maxResults": 50,
+  "maxPages": 5,
+  "proxyConfiguration": {
+    "useApifyProxy": true
+  }
+}
