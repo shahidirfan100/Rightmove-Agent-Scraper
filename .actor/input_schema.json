@@ -1,6 +1,6 @@
 {
   "title": "Rightmove Agent Scraper",
-  "description": "Extract UK estate agents and letting agents from Rightmove with comprehensive details including contact information, office addresses, property counts, and agent profiles.",
+  "description": "Extract UK estate agents and letting agents from Rightmove search results, including names, phone numbers, branch type, and listing description fields.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
@@ -18,6 +18,7 @@
       "description": "Location name to search for estate agents (e.g., 'London', 'Manchester', 'Birmingham')",
       "editor": "textfield",
       "example": "London",
+      "prefill": "London",
       "default": "London"
     },
     "locationIdentifier": {
@@ -25,7 +26,8 @@
       "type": "string",
       "description": "Rightmove location identifier (e.g., REGION^87490 for London). Leave empty to search by location name.",
       "editor": "textfield",
-      "example": "REGION^87490"
+      "example": "REGION^87490",
+      "prefill": "REGION^87490"
     },
     "radius": {
       "title": "Search Radius",
@@ -65,7 +67,8 @@
       "type": "string",
       "description": "Filter by specific agent brand name (optional, leave empty for all agents)",
       "editor": "textfield",
-      "example": "Foxtons"
+      "example": "Foxtons",
+      "prefill": ""
     },
     "branchType": {
       "title": "Branch Type",
@@ -82,14 +85,8 @@
         "Sales Only",
         "Lettings Only"
       ],
+      "prefill": "ALL",
       "default": "ALL"
-    },
-    "collectAgentDetails": {
-      "title": "Collect Full Agent Details",
-      "type": "boolean",
-      "description": "Visit each agent's profile page to extract complete information including full description, email, website, property counts, and services. Increases runtime but provides comprehensive data.",
-      "editor": "checkbox",
-      "default": true
     },
     "maxResults": {
       "title": "Maximum Agents",
@@ -97,17 +94,26 @@
       "description": "Maximum number of estate agents to collect (1-500)",
       "minimum": 1,
       "maximum": 500,
+      "prefill": 20,
       "default": 20,
       "editor": "number"
     },
     "maxPages": {
       "title": "Maximum Pages",
       "type": "integer",
-      "description": "Maximum number of result pages to process (each page contains ~10 agents)",
+      "description": "Maximum number of result pages to process (each page contains ~20 agents)",
       "minimum": 1,
       "maximum": 100,
-      "default": 5,
+      "prefill": 1,
+      "default": 1,
       "editor": "number"
+    },
+    "enrichProfiles": {
+      "title": "Enrich Agent Profiles",
+      "type": "boolean",
+      "description": "When enabled, the Actor also collects additional details from each agent page. Disabling this is much faster.",
+      "default": false,
+      "prefill": false
     },
     "proxyConfiguration": {
       "title": "Proxy Configuration",
@@ -115,7 +121,7 @@
       "description": "Proxy settings for requests. Residential proxies recommended to avoid blocking.",
       "editor": "proxy",
       "default": {
-        "useApifyProxy": true
+        "useApifyProxy": false
       }
     }
   },

@@ -1,6 +1,7 @@
 import { Actor, log } from "apify";
-import { CheerioCrawler, Dataset } from "crawlee";
-import { load as cheerioLoad } from "cheerio";
+import { Dataset, HttpCrawler } from "crawlee";
+
+log.setLevel(log.LEVELS.WARNING);
 
 // ============================================================================
 // CONSTANTS & CONFIGURATION
@@ -48,12 +49,19 @@ const STEALTHY_HEADERS = {
     "Sec-Ch-Ua-Platform": '"Windows"',
 };
 
-const REQUEST_DELAY_MS = 500;
-const REQUEST_JITTER = 300;
-const MAX_RETRIES = 5;
-const DEFAULT_AGENTS_PER_PAGE = 10;
+const REQUEST_DELAY_MS = 0;
+const REQUEST_JITTER = 50;
+const MAX_RETRIES = 3;
+const DEFAULT_AGENTS_PER_PAGE = 20;
 const DATASET_BATCH_SIZE = 15;
 const TIMEOUT_SECONDS = 60;
+
+const toUtf8String = (body) => {
+    if (!body) return "";
+    if (typeof body === "string") return body;
+    if (Buffer.isBuffer(body)) return body.toString("utf-8");
+    return String(body);
+};
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -63,7 +71,10 @@ const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGE
 
 const getRandomDelay = () => REQUEST_DELAY_MS + Math.random() * REQUEST_JITTER;
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms) =>
+    new Promise((resolve) => {
+        setTimeout(resolve, ms);
+    });
 
 const cleanText = (text) => {
     if (!text) return null;
@@ -71,19 +82,74 @@ const cleanText = (text) => {
     return cleaned.length > 0 ? cleaned : null;
 };
 
-const cleanDescription = (text) => {
-    if (!text) return null;
+const pruneNullishDeep = (value) => {
+    if (value === null || value === undefined) return undefined;
+    if (Array.isArray(value)) {
+        const cleaned = value
+            .map((v) => pruneNullishDeep(v))
+            .filter((v) => v !== undefined);
 
-    // Remove excessive whitespace but preserve paragraph structure
-    let cleaned = text
-        .replace(/\r\n/g, '\n')           // Normalize line breaks
-        .replace(/\n{3,}/g, '\n\n')       // Max 2 consecutive newlines (paragraph break)
-        .replace(/[ \t]+/g, ' ')          // Replace multiple spaces/tabs with single space
-        .replace(/\n /g, '\n')            // Remove spaces at start of lines
-        .replace(/ \n/g, '\n')            // Remove spaces at end of lines
-        .trim();
+        // Dedupe arrays to avoid noisy duplicate values in output.
+        // - Primitive arrays are deduped by value
+        // - Object arrays are deduped by common identity fields (id/url) when present
+        const seen = new Set();
+        const out = [];
+        for (const item of cleaned) {
+            const t = typeof item;
+            let key = null;
+            if (item === null || item === undefined) continue;
 
-    return cleaned.length > 0 ? cleaned : null;
+            if (t === "string" || t === "number" || t === "boolean") {
+                key = `${t}:${String(item)}`;
+            } else if (t === "object" && !Array.isArray(item)) {
+                if (item.id != null) key = `id:${String(item.id)}`;
+                else if (item.branchId != null) key = `branchId:${String(item.branchId)}`;
+                else if (item.companyId != null) key = `companyId:${String(item.companyId)}`;
+                else if (item.url) key = `url:${String(item.url)}`;
+                else if (item.href) key = `href:${String(item.href)}`;
+            }
+
+            if (key) {
+                if (seen.has(key)) continue;
+                seen.add(key);
+            }
+            out.push(item);
+        }
+        return out;
+    }
+    if (typeof value === "object") {
+        const out = {};
+        for (const [key, v] of Object.entries(value)) {
+            const cleaned = pruneNullishDeep(v);
+            if (cleaned === undefined) continue;
+
+            // Drop empty objects produced by pruning
+            if (typeof cleaned === "object" && !Array.isArray(cleaned) && Object.keys(cleaned).length === 0) {
+                continue;
+            }
+            out[key] = cleaned;
+        }
+        return out;
+    }
+    return value;
+};
+
+const compactAgentProfile = (apr) => {
+    if (!apr || typeof apr !== "object") return null;
+
+    // These objects can be very large because they may include full property cards.
+    // Keep the profile useful, but remove heavy lists to keep dataset size reasonable.
+    const clone = typeof structuredClone === "function" ? structuredClone(apr) : JSON.parse(JSON.stringify(apr));
+
+    // Remove bulky property lists (user asked specifically to remove sale properties).
+    delete clone.salesProperties;
+    delete clone.lettingsProperties;
+
+    // Defensive: remove nested `properties` arrays if they appear under other keys.
+    if (clone.salesProperties?.properties) delete clone.salesProperties.properties;
+    if (clone.lettingsProperties?.properties) delete clone.lettingsProperties.properties;
+
+    return pruneNullishDeep(clone);
 };
 
 const ensureAbsoluteUrl = (url) => {
@@ -100,23 +166,59 @@ const extractAgentId = (url) => {
     return match ? match[1] || match[2] || match[3] : null;
 };
 
-const extractJsonLd = (html) => {
-    if (!html) return [];
-    const $ = cheerioLoad(html);
-    const scripts = $('script[type="application/ld+json"]');
-    const data = [];
-    scripts.each((_, el) => {
-        try {
-            const content = $(el).html();
-            if (!content) return;
-            const parsed = JSON.parse(content);
-            if (Array.isArray(parsed)) data.push(...parsed);
-            else data.push(parsed);
-        } catch (e) {
-            log.debug(`JSON-LD parse error: ${e.message}`);
+const extractNextDataFromHtml = (html) => {
+    if (!html) return null;
+
+    // Rightmove uses a Next.js app; we treat the embedded __NEXT_DATA__ JSON as a structured source.
+    // Keep regex flexible (attribute order can change).
+    const match = html.match(/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/);
+    if (!match) return null;
+
+    try {
+        return JSON.parse(match[1]);
+    } catch (e) {
+        log.debug(`__NEXT_DATA__ parse error: ${e.message}`);
+        return null;
+    }
+};
+
+const findDeepObject = (root, predicate, { maxNodes = 5000 } = {}) => {
+    if (!root || typeof root !== "object") return null;
+    const queue = [root];
+    const visited = new Set();
+    let seen = 0;
+
+    while (queue.length > 0) {
+        const current = queue.shift();
+        if (!current || typeof current !== "object") continue;
+        if (visited.has(current)) continue;
+        visited.add(current);
+
+        seen += 1;
+        if (seen > maxNodes) return null;
+
+        if (!Array.isArray(current) && predicate(current)) return current;
+
+        if (Array.isArray(current)) {
+            for (const item of current) queue.push(item);
+        } else {
+            for (const value of Object.values(current)) queue.push(value);
         }
-    });
-    return data;
+    }
+
+    return null;
+};
+
+const buildRightmoveLogoUrl = (logoPath) => {
+    if (!logoPath) return null;
+    if (logoPath.startsWith("http")) return logoPath;
+
+    // Rightmove agent JSON often uses media paths like "/34k/33248/branch_logo_...png"
+    // These are served from media.rightmove.co.uk (not www.rightmove.co.uk)
+    if (logoPath.startsWith("/")) {
+        return `https://media.rightmove.co.uk/dir${logoPath}`;
+    }
+    return `https://media.rightmove.co.uk/dir/${logoPath}`;
 };
 
 const buildSearchUrl = (input) => {
@@ -155,275 +257,199 @@ const buildSearchUrl = (input) => {
 // DATA EXTRACTION
 // ============================================================================
 
-const extractAgentCard = ($, cardElement) => {
-    try {
-        const card = $(cardElement);
-
-        // Extract agent name and profile URL
-        const nameLink = card.find('a.ksc_link, a[class*="agentCard_ctaLink"]').first();
-        if (!nameLink.length) return null;
-
-        const agentUrl = ensureAbsoluteUrl(nameLink.attr("href"));
-        const agentId = extractAgentId(agentUrl);
-        const agentName = cleanText(nameLink.text()) || cleanText(card.find('h2, h3').first().text());
-
-        if (!agentName || !agentUrl) return null;
-
-        // Extract phone number
-        let phone = null;
-        const cardText = card.text();
-        const telMatch = cardText.match(/Tel[:\s]*([\d\s]+)/i);
-        if (telMatch) {
-            phone = cleanText(telMatch[1].replace(/\s+/g, ' '));
-        }
-
-        // Extract logo
-        let logo = null;
-        const logoImg = card.find('img').first();
-        if (logoImg.length) {
-            logo = ensureAbsoluteUrl(logoImg.attr("src") || logoImg.attr("data-src"));
-        }
-
-        // Extract branch type (SALES/LETTINGS)
-        let branchType = "ALL";
-        const branchTypeText = cardText.match(/(SALES|LETTINGS)/i);
-        if (branchTypeText) {
-            branchType = branchTypeText[1].toUpperCase();
-        }
-
-        // Extract description/snippet
-        let description = null;
-        const descriptionEl = card.find('p').filter((_, el) => {
-            const text = $(el).text();
-            return text.length > 20 && !text.includes('Tel');
-        }).first();
-        if (descriptionEl.length) {
-            description = cleanText(descriptionEl.text());
-            if (description && description.length > 200) {
-                description = description.substring(0, 200) + '...';
-            }
-        }
-
-        // Try to extract address
-        let address = null;
-        const addressPatterns = card.find('[class*="address"], span, div').filter((_, el) => {
-            const text = $(el).text();
-            return text.includes(',') && text.length > 10 && text.length < 150;
-        });
-        if (addressPatterns.length) {
-            address = cleanText(addressPatterns.first().text());
-        }
-
-        return {
-            agentId,
-            name: agentName,
-            url: agentUrl,
-            phone,
-            logo,
-            branchType,
-            description,
-            address,
-        };
-    } catch (error) {
-        log.warning(`Agent card extraction error: ${error.message}`);
-        return null;
-    }
+const normalizeBranchType = ({ sales, lettings }) => {
+    if (sales && lettings) return "ALL";
+    if (sales) return "SALES";
+    if (lettings) return "LETTINGS";
+    return "ALL";
 };
 
-const extractAgentDetails = ($, html, basicInfo = {}) => {
-    try {
-        const jsonLdData = extractJsonLd(html);
-        let agentData = { ...basicInfo };
-
-        // Try to find organization JSON-LD
-        const orgJsonLd = jsonLdData.find((d) => {
-            const type = d["@type"];
-            return type === "RealEstateAgent" || type === "Organization" || type === "LocalBusiness";
-        });
-
-        if (orgJsonLd) {
-            if (orgJsonLd.name) agentData.name = orgJsonLd.name;
-            if (orgJsonLd.telephone) agentData.phone = orgJsonLd.telephone;
-            if (orgJsonLd.email) agentData.email = orgJsonLd.email;
-            if (orgJsonLd.url || orgJsonLd.website) agentData.website = orgJsonLd.url || orgJsonLd.website;
-            if (orgJsonLd.address) {
-                const addr = orgJsonLd.address;
-                if (typeof addr === 'string') {
-                    agentData.address = addr;
-                } else if (addr.streetAddress || addr.addressLocality) {
-                    agentData.address = [
-                        addr.streetAddress,
-                        addr.addressLocality,
-                        addr.postalCode
-                    ].filter(Boolean).join(', ');
-                }
-            }
-            if (orgJsonLd.description) agentData.description = orgJsonLd.description;
-        }
-
-        // Extract full description with specific Rightmove selector
-        if (!agentData.description) {
-            // Primary selector: exact Rightmove description class
-            const primaryDesc = $('div.branchInfo_description__NmvTq');
-
-            if (primaryDesc.length) {
-                // Extract complete text from the description container
-                // This gets all text including hidden "Read More" content
-                const fullDescription = cleanDescription(primaryDesc.text());
-
-                // Check if there are separate tabs for Sales and Letting
-                // Look for tab panels or separate description sections
-                const salesTab = $('[class*="sales"] div.branchInfo_description__NmvTq, [data-tab="sales"] div.branchInfo_description__NmvTq, [id*="sales"] div.branchInfo_description__NmvTq');
-                const lettingTab = $('[class*="letting"] div.branchInfo_description__NmvTq, [data-tab="letting"] div.branchInfo_description__NmvTq, [id*="letting"] div.branchInfo_description__NmvTq');
-
-                if (salesTab.length || lettingTab.length) {
-                    // Separate tabs exist - extract each
-                    if (salesTab.length) {
-                        agentData.descriptionSales = cleanDescription(salesTab.text());
-                    }
-                    if (lettingTab.length) {
-                        agentData.descriptionLetting = cleanDescription(lettingTab.text());
-                    }
-                } else {
-                    // No separate tabs - use the full description
-                    // Try to find all description instances (there might be multiple)
-                    const allDescriptions = $('div.branchInfo_description__NmvTq');
-                    if (allDescriptions.length > 1) {
-                        // Multiple descriptions found - likely one for sales, one for letting
-                        const descriptions = [];
-                        allDescriptions.each((i, el) => {
-                            const text = cleanDescription($(el).text());
-                            if (text && text.length > 50) {
-                                descriptions.push(text);
-                            }
-                        });
-
-                        if (descriptions.length >= 2) {
-                            // Assume first is sales, second is letting
-                            agentData.descriptionSales = descriptions[0];
-                            agentData.descriptionLetting = descriptions[1];
-                        } else if (descriptions.length === 1) {
-                            agentData.description = descriptions[0];
-                        }
-                    } else if (fullDescription) {
-                        // Single description container
-                        agentData.description = fullDescription;
-                    }
-                }
-            }
-
-            // Fallback selectors if primary not found
-            if (!agentData.description && !agentData.descriptionSales && !agentData.descriptionLetting) {
-                const descSelectors = [
-                    'div[class*="branchInfo_description"]',
-                    '[class*="description"][class*="branch"]',
-                    '[class*="about"][class*="text"]',
-                    'div[class*="description"] p',
-                    'section[class*="about"] p',
-                    '[class*="profile"] p'
-                ];
-                for (const selector of descSelectors) {
-                    const descElements = $(selector);
-                    if (descElements.length) {
-                        const desc = cleanDescription(descElements.text());
-                        if (desc && desc.length > 50) {
-                            agentData.description = desc;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Extract contact details if not found in JSON-LD
-        if (!agentData.phone) {
-            const phoneSelectors = ['[class*="phone"]', '[class*="tel"]', 'a[href^="tel:"]'];
-            for (const selector of phoneSelectors) {
-                const phoneEl = $(selector).first();
-                if (phoneEl.length) {
-                    agentData.phone = cleanText(phoneEl.text()) || phoneEl.attr('href')?.replace('tel:', '');
-                    if (agentData.phone) break;
-                }
-            }
-        }
-
-        if (!agentData.email) {
-            const emailSelectors = ['[class*="email"]', 'a[href^="mailto:"]'];
-            for (const selector of emailSelectors) {
-                const emailEl = $(selector).first();
-                if (emailEl.length) {
-                    agentData.email = cleanText(emailEl.text()) || emailEl.attr('href')?.replace('mailto:', '');
-                    if (agentData.email) break;
-                }
-            }
-        }
-
-        if (!agentData.website) {
-            const websiteSelectors = ['[class*="website"]', 'a[class*="web"]'];
-            for (const selector of websiteSelectors) {
-                const webEl = $(selector).first();
-                if (webEl.length) {
-                    agentData.website = webEl.attr('href');
-                    if (agentData.website && agentData.website.startsWith('http')) break;
-                }
-            }
-        }
-
-        // Extract address if not found
-        if (!agentData.address) {
-            const addressSelectors = ['[class*="address"]', '[itemprop="address"]'];
-            for (const selector of addressSelectors) {
-                const addrEl = $(selector).first();
-                if (addrEl.length) {
-                    agentData.address = cleanText(addrEl.text());
-                    if (agentData.address) break;
-                }
-            }
-        }
-
-        // Extract property statistics
-        const pageText = $.text();
-
-        // Properties for sale
-        const forSaleMatch = pageText.match(/(\d+)\s*properties?\s*for\s*sale/i);
-        if (forSaleMatch) {
-            agentData.propertiesForSale = parseInt(forSaleMatch[1], 10);
-        }
-
-        // Properties to let
-        const toLetMatch = pageText.match(/(\d+)\s*properties?\s*to\s*let/i);
-        if (toLetMatch) {
-            agentData.propertiesToLet = parseInt(toLetMatch[1], 10);
-        }
-
-        // Extract team members count
-        const teamMatch = pageText.match(/(\d+)\s*(?:team members?|staff|agents?)/i);
-        if (teamMatch) {
-            agentData.teamMembers = parseInt(teamMatch[1], 10);
-        }
-
-        // Extract services offered
-        const services = [];
-        const serviceKeywords = ['sales', 'lettings', 'mortgages', 'conveyancing', 'valuation', 'property management'];
-        const lowerPageText = pageText.toLowerCase();
-        serviceKeywords.forEach(service => {
-            if (lowerPageText.includes(service)) {
-                services.push(service.charAt(0).toUpperCase() + service.slice(1));
-            }
-        });
-        if (services.length > 0) {
-            agentData.servicesOffered = services;
-        }
-
-        return {
-            ...agentData,
-            extractionMethod: orgJsonLd ? "json-ld" : "html-parse",
-        };
-    } catch (error) {
-        log.warning(`Agent detail extraction error: ${error.message}`);
-        return { ...basicInfo, extractionMethod: "failed" };
-    }
+const pickTelephoneByType = (telephoneNumbers, targetType) => {
+    if (!Array.isArray(telephoneNumbers)) return null;
+    const found = telephoneNumbers.find((t) => (t?.type || "").toUpperCase() === targetType);
+    return cleanText(found?.directNumber || found?.number);
 };
+
+const extractAgentsFromSearchHtml = (html) => {
+    const nextData = extractNextDataFromHtml(html);
+    if (!nextData) return { agents: [], pagination: null };
+
+    const agents =
+        nextData?.props?.pageProps?.data?.results?.agentsData?.agents ||
+        nextData?.props?.pageProps?.data?.results?.agents ||
+        [];
+    const pagination =
+        nextData?.props?.pageProps?.data?.results?.paginationData ||
+        nextData?.props?.pageProps?.data?.results?.agentsData?.pagination ||
+        null;
+
+    // The search page sometimes returns duplicates per branch (e.g. separate records for sales vs lettings).
+    // Merge by id so we produce one output row per branch.
+    const byId = new Map();
+    for (const item of agents) {
+        const id = item?.id != null ? String(item.id) : extractAgentId(item?.branchLink?.href);
+        if (!id) continue;
+
+        const prev = byId.get(id);
+        if (!prev) {
+            byId.set(id, {
+                ...item,
+                id,
+                telephoneNumbers: Array.isArray(item.telephoneNumbers) ? [...item.telephoneNumbers] : [],
+                sales: !!item.sales,
+                lettings: !!item.lettings,
+            });
+            continue;
+        }
+
+        prev.sales = prev.sales || !!item.sales;
+        prev.lettings = prev.lettings || !!item.lettings;
+
+        const nums = Array.isArray(item.telephoneNumbers) ? item.telephoneNumbers : [];
+        const existing = new Set(prev.telephoneNumbers.map((t) => `${t?.type}|${t?.directNumber || t?.number}`));
+        for (const t of nums) {
+            const key = `${t?.type}|${t?.directNumber || t?.number}`;
+            if (!existing.has(key)) {
+                prev.telephoneNumbers.push(t);
+                existing.add(key);
+            }
+        }
+    }
+
+    return { agents: [...byId.values()], pagination };
+};
+
+const extractAgentProfileResponseFromProfileHtml = (html) => {
+    const nextData = extractNextDataFromHtml(html);
+    const data = nextData?.props?.pageProps?.data;
+    if (!data) return null;
+
+    const direct =
+        data?.branchProfileResponse?.agentProfileResponse ||
+        data?.agentProfileResponse ||
+        data?.agentProfile ||
+        null;
+    if (direct) return direct;
+
+    // Fallback: scan for an object that looks like Rightmove's agent profile response.
+    return findDeepObject(
+        data,
+        (obj) =>
+            (obj.branchId != null || obj.companyId != null) &&
+            (typeof obj.branchDisplayName === "string" || typeof obj.branchName === "string") &&
+            (typeof obj.branchAddress === "string" || typeof obj.branchPostcode === "string" || typeof obj.companyName === "string")
+    );
+};
+
+const normalizeProfileData = (apr) => {
+    if (!apr || typeof apr !== "object") return null;
+
+    const lettingsSummary = apr.lettingsProperties
+        ? pruneNullishDeep({
+              totalNumberOfProperties: apr.lettingsProperties.totalNumberOfProperties,
+              propertySearchPath: apr.lettingsProperties.propertySearchPath,
+          })
+        : null;
+
+    const salesSummary = apr.salesProperties
+        ? pruneNullishDeep({
+              totalNumberOfProperties: apr.salesProperties.totalNumberOfProperties,
+              propertySearchPath: apr.salesProperties.propertySearchPath,
+          })
+        : null;
+
+    return {
+        branchId: apr.branchId != null ? String(apr.branchId) : null,
+        companyId: apr.companyId != null ? String(apr.companyId) : null,
+
+        branchAddress: cleanText(apr.branchAddress),
+        branchPostcode: cleanText(apr.branchPostcode),
+
+        branchDisplayName: cleanText(apr.branchDisplayName),
+        branchName: cleanText(apr.branchName),
+        brandTradingName: cleanText(apr.brandTradingName),
+
+        branchMainTelephone: cleanText(apr.branchMainTelephone),
+        branchLettingsTelephone: cleanText(apr.branchLettingsTelephone),
+
+        branchLogoUrl: ensureAbsoluteUrl(apr.branchLogoUrl),
+        fullBranchLogoUrl: ensureAbsoluteUrl(apr.fullBranchLogoUrl),
+        brandLogoUrl: buildRightmoveLogoUrl(apr.brandLogoPath),
+        branchStaticMapImageUrl: ensureAbsoluteUrl(apr.branchStaticMapImageUrl),
+
+        companyName: cleanText(apr.companyName),
+        companyTradingName: cleanText(apr.companyTradingName),
+        companyTypeAlias: cleanText(apr.companyTypeAlias),
+
+        branchSummaryProfile: cleanText(apr.branchSummary),
+        branchDescription: cleanText(apr.branchDescription),
+        primaryDescription: cleanText(apr.primaryDescription),
+        lettingsPrimaryDescription: cleanText(apr.lettingsPrimaryDescription),
+
+        branchProfileUrl: ensureAbsoluteUrl(apr.branchProfilePath),
+        lettingsSearchUrl: ensureAbsoluteUrl(apr.lettingsSearchPath),
+
+        hasLettings: !!apr.lettings,
+        hasSales: !!apr.sales,
+        hasCommercial: !!apr.commercial,
+        hasOverseas: !!apr.overseas,
+        hasDevelopment: !!apr.development,
+        hasBuildToRent: !!apr.buildToRent,
+
+        industryAffiliations: apr.industryAffiliations || null,
+        productsInfo: apr.productsInfo || null,
+        testimonials: apr.testimonials || null,
+
+        lettingsPropertiesSummary: lettingsSummary,
+        salesPropertiesSummary: salesSummary,
+    };
+};
+
+const normalizeSearchAgent = (item, inputBranchType = "ALL") => {
+    const agentId = item?.id != null ? String(item.id) : extractAgentId(item?.branchLink?.href);
+
+    const profileHref = item?.aboutLink?.href || item?.branchLink?.href;
+    const url = ensureAbsoluteUrl(profileHref);
+    const branchType = normalizeBranchType({ sales: !!item?.sales, lettings: !!item?.lettings });
+
+    const phoneSales = pickTelephoneByType(item?.telephoneNumbers, "RESALE");
+    const phoneLettings = pickTelephoneByType(item?.telephoneNumbers, "LETTING");
+    const fallbackPhone = cleanText(item?.telephoneNumbers?.[0]?.directNumber || item?.telephoneNumbers?.[0]?.number);
+
+    let phone = null;
+    if (inputBranchType === "SALES") phone = phoneSales || fallbackPhone || phoneLettings;
+    else if (inputBranchType === "LETTINGS") phone = phoneLettings || fallbackPhone || phoneSales;
+    else phone = fallbackPhone || phoneSales || phoneLettings;
+
+    return {
+        agentId,
+        name: cleanText(item?.branchDisplayName || item?.name || item?.brandName),
+        url,
+        phone,
+        phoneSales,
+        phoneLettings,
+        logo: buildRightmoveLogoUrl(item?.logoPath),
+        branchType,
+
+        brandName: cleanText(item?.brandName),
+        branchSummary: cleanText(item?.branchSummary),
+        description: cleanText(item?.description),
+        primaryDescriptionHtml: cleanText(item?.primaryDescription),
+
+        micrositeDescriptionSummary: cleanText(item?.microsite?.descriptionSummary),
+        micrositeHomeLink: ensureAbsoluteUrl(item?.microsite?.homeLink?.href),
+        micrositeTabLinks: Array.isArray(item?.microsite?.tabLinks)
+            ? item.microsite.tabLinks.map((t) => ({
+                  text: cleanText(t?.text),
+                  href: ensureAbsoluteUrl(t?.href),
+              }))
+            : null,
+
+        extractionMethod: "next-data",
+    };
+};
+
+
 
 // ============================================================================
 // MAIN ACTOR
@@ -439,156 +465,153 @@ try {
         radius = "0.0",
         brandName = "",
         branchType = "ALL",
-        collectAgentDetails = true,
-        maxResults = 100,
-        maxPages = 5,
+        maxResults = 20,
+        maxPages = 1,
         startUrl = null,
+        enrichProfiles = false,
     } = input;
 
     const searchUrl = buildSearchUrl({ startUrl, searchLocation, locationIdentifier, radius, brandName, branchType });
 
-    log.info("✓ Starting Rightmove Agent Scraper");
-    if (startUrl) {
-        log.info(`  Search Method: Direct URL`);
-    } else if (locationIdentifier) {
-        log.info(`  Search Method: Location Identifier (${locationIdentifier})`);
-    } else if (searchLocation) {
-        log.info(`  Search Method: Location "${searchLocation}"`);
-    } else {
-        log.info(`  Search Method: Default (London)`);
-    }
-    log.info(`  Search URL: ${searchUrl}`);
-    log.info(`  Config: ${maxResults} agents, ${maxPages} pages, Details: ${collectAgentDetails}`);
-    if (brandName) log.info(`  Brand Filter: ${brandName}`);
-    if (branchType !== "ALL") log.info(`  Branch Type: ${branchType}`);
+    log.warning("Starting Rightmove Agent Scraper");
+    log.warning(`Search URL: ${searchUrl}`);
+    log.warning(
+        `Config: maxResults=${maxResults}, maxPages=${maxPages}, branchType=${branchType || "ALL"}, enrichProfiles=${enrichProfiles}`
+    );
 
     let agentsScraped = 0;
-    let agentsQueued = 0;
-    const agentUrls = new Set();
+    const agentIds = new Set();
+    const pushedAgentIds = new Set();
     const agentDataBatch = [];
-    let currentPage = 1;
+
+    let searchPagesProcessed = 0;
 
     const proxyConfig = input.proxyConfiguration
         ? await Actor.createProxyConfiguration(input.proxyConfiguration)
         : await Actor.createProxyConfiguration();
 
-    const crawler = new CheerioCrawler({
+    const crawler = new HttpCrawler({
         proxyConfiguration: proxyConfig,
         requestHandlerTimeoutSecs: TIMEOUT_SECONDS,
         maxRequestRetries: MAX_RETRIES,
-        maxConcurrency: 5,
+        maxConcurrency: 15,
         useSessionPool: true,
 
-        async requestHandler({ request, $, body, response }) {
+        async requestHandler({ request, body }) {
             const { url, userData } = request;
+            const requestType = userData?.type || "SEARCH";
             try {
-                request.headers = { ...request.headers, ...STEALTHY_HEADERS, "User-Agent": getRandomUserAgent() };
+                if (requestType === "SEARCH") {
+                    searchPagesProcessed += 1;
 
-                if (userData?.isAgentDetail) {
-                    const agentDetails = extractAgentDetails($, body, userData.basicInfo);
-                    const agent = { ...userData.basicInfo, ...agentDetails, scrapedAt: new Date().toISOString() };
-                    agentDataBatch.push(agent);
-                    agentsScraped += 1;
-                    log.info(`  Agent ${agentsScraped}/${maxResults}: ${agent.name}`);
-                    if (agentDataBatch.length >= DATASET_BATCH_SIZE) {
-                        await Dataset.pushData([...agentDataBatch]);
-                        agentDataBatch.length = 0;
+                    const html = toUtf8String(body);
+
+                    // Extract structured agent list from embedded Next.js __NEXT_DATA__
+                    const { agents: rawAgents, pagination } = extractAgentsFromSearchHtml(html);
+                    if (!rawAgents.length) {
+                        log.warning("  ⚠ No agents found in structured page data (blocked or markup changed)");
                     }
-                    return;
-                }
 
-                // Extract agent cards from listing page
-                let agentCards = [];
+                    for (const raw of rawAgents) {
+                        if (agentsScraped >= maxResults) break;
 
-                // Try multiple selectors to find agent containers
-                const possibleSelectors = [
-                    '[class*="agentCard_agentCard"]',  // Primary agent card selector
-                    'div[class*="agentCard"]',
-                    'article[class*="agent"]',
-                    'div[class*="branch"]'
-                ];
+                        const listingAgent = normalizeSearchAgent(raw, branchType);
+                        if (!listingAgent?.agentId || !listingAgent?.url) continue;
 
-                for (const selector of possibleSelectors) {
-                    agentCards = $(selector).toArray();
-                    if (agentCards.length >= 5) break;  // Found substantial results
-                }
+                        if (agentIds.has(listingAgent.agentId)) continue;
+                        agentIds.add(listingAgent.agentId);
+                        agentsScraped += 1;
 
-                if (agentCards.length === 0) {
-                    log.warning(`  ⚠ No agent cards found on page - check selectors or region may have no agents`);
-                }
+                        if (!enrichProfiles) {
+                            const finalAgent = pruneNullishDeep({
+                                ...listingAgent,
+                                scrapedAt: new Date().toISOString(),
+                            });
+                            pushedAgentIds.add(String(listingAgent.agentId));
+                            if (finalAgent && Object.keys(finalAgent).length > 0) agentDataBatch.push(finalAgent);
+                            continue;
+                        }
 
-                const agents = [];
-                for (const card of agentCards) {
-                    if (agentsQueued >= maxResults) break;
-                    const agent = extractAgentCard($, card);
-                    if (agent && !agentUrls.has(agent.url)) {
-                        agentUrls.add(agent.url);
-                        agents.push(agent);
-                        agentsQueued += 1;
-                    }
-                }
-                log.info(`  Extracted ${agents.length} new agents (${agentsQueued}/${maxResults} total queued)`);
-
-                if (collectAgentDetails) {
-                    for (const agent of agents) {
-                        if (agentsQueued > maxResults) break;
                         await crawler.addRequests([
                             {
-                                url: agent.url,
-                                userData: { isAgentDetail: true, basicInfo: agent },
+                                url: listingAgent.url,
+                                userData: {
+                                    type: "PROFILE",
+                                    agentId: listingAgent.agentId,
+                                    listingAgent,
+                                },
                                 headers: { ...STEALTHY_HEADERS, "User-Agent": getRandomUserAgent() },
                             },
                         ]);
                     }
-                } else {
-                    for (const agent of agents) {
-                        if (agentsScraped >= maxResults) break;
-                        agentDataBatch.push({
-                            ...agent,
-                            scrapedAt: new Date().toISOString(),
-                            extractionMethod: "basic-card",
-                        });
-                        agentsScraped += 1;
-                    }
-                    if (agentDataBatch.length >= DATASET_BATCH_SIZE) {
-                        await Dataset.pushData([...agentDataBatch]);
-                        agentDataBatch.length = 0;
-                    }
-                }
 
-                // Handle pagination
-                if (agentsQueued < maxResults && currentPage < maxPages) {
-                    let nextUrl = null;
-
-                    // Try to find next button
-                    const nextButton = $('button[class*="pagination_next"], a[class*="pagination_next"], button:contains("Next")').first();
-                    if (nextButton.length && !nextButton.prop('disabled')) {
-                        const nextHref = nextButton.attr("href");
-                        if (nextHref) nextUrl = ensureAbsoluteUrl(nextHref);
+                    if (!enrichProfiles && agentDataBatch.length >= DATASET_BATCH_SIZE) {
+                        const toPush = agentDataBatch.splice(0, agentDataBatch.length);
+                        await Dataset.pushData(toPush);
+                        log.warning(`Pushed ${toPush.length} agents (total ${pushedAgentIds.size})`);
                     }
 
-                    // Fallback: construct URL with index parameter
-                    if (!nextUrl) {
+                    // Handle pagination (search pages only)
+                    const pageNumber = userData?.pageNumber || 1;
+                    if (agentsScraped < maxResults && pageNumber < maxPages) {
                         const urlObj = new URL(url);
-                        const index = parseInt(urlObj.searchParams.get("index"), 10) || 0;
-                        urlObj.searchParams.set("index", index + DEFAULT_AGENTS_PER_PAGE);
-                        nextUrl = urlObj.toString();
-                    }
+                        const currentIndex = parseInt(urlObj.searchParams.get("index") || "0", 10) || 0;
 
-                    if (nextUrl) {
-                        currentPage += 1;
-                        log.info(`  Moving to page ${currentPage}`);
+                        const indexFirstAgent = pagination?.indexFirstAgent ?? null;
+                        const indexLastAgent = pagination?.indexLastAgent ?? null;
+                        const inferredPageSize =
+                            typeof indexFirstAgent === "number" && typeof indexLastAgent === "number"
+                                ? Math.max(1, indexLastAgent - indexFirstAgent + 1)
+                                : null;
+                        const pageSize = inferredPageSize || (rawAgents?.length || DEFAULT_AGENTS_PER_PAGE);
+
+                        const nextIndex = currentIndex + pageSize;
+                        urlObj.searchParams.set("index", String(nextIndex));
+                        const nextUrl = urlObj.toString();
+
                         await crawler.addRequests([
                             {
                                 url: nextUrl,
-                                userData: { isAgentDetail: false, pageNumber: currentPage },
+                                userData: { type: "SEARCH", pageNumber: pageNumber + 1 },
                                 headers: { ...STEALTHY_HEADERS, "User-Agent": getRandomUserAgent() },
                             },
                         ]);
                     }
+
+                    if (getRandomDelay() > 0) await sleep(getRandomDelay());
+                    return;
                 }
 
-                await sleep(getRandomDelay());
+                if (requestType === "PROFILE") {
+                    const html = toUtf8String(body);
+                    const listingAgent = userData?.listingAgent || null;
+                    const agentId = userData?.agentId || listingAgent?.agentId || extractAgentId(url);
+
+                    const apr = extractAgentProfileResponseFromProfileHtml(html);
+                    const profile = normalizeProfileData(apr);
+                    const agentProfile = compactAgentProfile(apr);
+
+                    const finalAgent = pruneNullishDeep({
+                        ...listingAgent,
+                        ...profile,
+                        agentProfile,
+                        scrapedAt: new Date().toISOString(),
+                        extractionMethod: "next-data",
+                    });
+
+                    if (agentId) pushedAgentIds.add(String(agentId));
+                    if (finalAgent && Object.keys(finalAgent).length > 0) {
+                        agentDataBatch.push(finalAgent);
+                    }
+
+                    if (agentDataBatch.length >= DATASET_BATCH_SIZE) {
+                        const toPush = agentDataBatch.splice(0, agentDataBatch.length);
+                        await Dataset.pushData(toPush);
+                        log.warning(`Pushed ${toPush.length} agents (total ${pushedAgentIds.size})`);
+                    }
+
+                    if (getRandomDelay() > 0) await sleep(getRandomDelay());
+                }
             } catch (error) {
                 log.error(`Handler error: ${error.message}`);
                 throw error;
@@ -598,29 +621,55 @@ try {
         errorHandler: async ({ request }) => {
             log.warning(`Failed: ${request.url} (retries: ${request.retryCount}/${MAX_RETRIES})`);
         },
+
+        // Last-resort fallback: if a profile page fails after retries, push the listing-only data
+        // so the dataset is not missing rows.
+        failedRequestHandler: async ({ request }) => {
+            const { userData } = request;
+            if (userData?.type !== "PROFILE") return;
+
+            const listingAgent = userData?.listingAgent;
+            const agentId = userData?.agentId || listingAgent?.agentId;
+            if (!listingAgent || !agentId) return;
+            if (pushedAgentIds.has(String(agentId))) return;
+
+            const finalAgent = pruneNullishDeep({
+                ...listingAgent,
+                scrapedAt: new Date().toISOString(),
+                extractionMethod: "next-data",
+            });
+
+            pushedAgentIds.add(String(agentId));
+            await Dataset.pushData(finalAgent);
+            log.warning(`Pushed 1 agent (profile failed; total ${pushedAgentIds.size})`);
+        },
     });
 
     await crawler.addRequests([
         {
             url: searchUrl,
-            userData: { isAgentDetail: false, pageNumber: 1 },
+            userData: { type: "SEARCH", pageNumber: 1 },
             headers: { ...STEALTHY_HEADERS, "User-Agent": getRandomUserAgent() },
         },
     ]);
 
-    log.info("Starting crawler...");
     await crawler.run();
 
-    if (agentDataBatch.length > 0) await Dataset.pushData(agentDataBatch);
+    if (agentDataBatch.length > 0) {
+        const toPush = agentDataBatch.splice(0, agentDataBatch.length);
+        await Dataset.pushData(toPush);
+        log.warning(`Pushed ${toPush.length} agents (total ${pushedAgentIds.size})`);
+    }
 
-    log.info("✓ Completed!");
-    log.info(`  Agents Scraped: ${agentsScraped}, Queued: ${agentsQueued}, Unique: ${agentUrls.size}, Pages: ${currentPage}`);
+    log.warning("Completed");
+    log.warning(`Agents targeted: ${agentsScraped}, Unique: ${agentIds.size}, Search pages: ${searchPagesProcessed}, Pushed: ${pushedAgentIds.size}`);
 
     await Actor.setValue("OUTPUT", {
         status: "success",
-        agentsScraped,
-        uniqueAgents: agentUrls.size,
-        pagesProcessed: currentPage,
+        agentsTargeted: agentsScraped,
+        uniqueAgents: agentIds.size,
+        searchPagesProcessed,
+        pushed: pushedAgentIds.size,
         completedAt: new Date().toISOString(),
     });
 } catch (error) {

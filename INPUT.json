@@ -5,9 +5,9 @@
   "radius": "0.0",
   "brandName": "",
   "branchType": "ALL",
-  "collectAgentDetails": true,
   "maxResults": 20,
-  "maxPages": 3,
+  "maxPages": 1,
+  "enrichProfiles": false,
   "proxyConfiguration": {
     "useApifyProxy": true
   }

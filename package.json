@@ -1,6 +1,6 @@
 {
   "name": "rightmove-agent-scraper",
-  "version": "1.0.0",
+  "version": "1.0",
   "description": "Rightmove Agent Scraper - Extract UK estate agents, letting agents, contact details, office addresses, and comprehensive agent data",
   "type": "module",
   "dependencies": {

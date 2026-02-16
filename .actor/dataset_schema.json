@@ -10,7 +10,6 @@
           "name",
           "phone",
           "branchType",
-          "address",
           "url"
         ]
       },
@@ -33,10 +32,6 @@
             "label": "Branch Type",
             "format": "text"
           },
-          "address": {
-            "label": "Address",
-            "format": "text"
-          },
           "url": {
             "label": "Agent URL",
             "format": "link"
@@ -51,19 +46,22 @@
           "agentId",
           "name",
           "phone",
-          "email",
-          "website",
-          "address",
+          "phoneSales",
+          "phoneLettings",
           "branchType",
+          "brandName",
+          "companyName",
+          "branchAddress",
+          "branchPostcode",
+          "branchMainTelephone",
+          "branchLettingsTelephone",
+          "branchSummary",
           "description",
-          "descriptionSales",
-          "descriptionLetting",
-          "propertiesForSale",
-          "propertiesToLet",
-          "teamMembers",
-          "servicesOffered",
+          "primaryDescriptionHtml",
           "url",
-          "logo"
+          "logo",
+          "fullBranchLogoUrl",
+          "branchStaticMapImageUrl"
         ]
       },
       "display": {
@@ -81,49 +79,53 @@
             "label": "Phone",
             "format": "text"
           },
-          "email": {
-            "label": "Email",
+          "phoneSales": {
+            "label": "Phone (Sales)",
             "format": "text"
           },
-          "website": {
-            "label": "Website",
-            "format": "link"
-          },
-          "address": {
-            "label": "Office Address",
+          "phoneLettings": {
+            "label": "Phone (Lettings)",
             "format": "text"
           },
           "branchType": {
             "label": "Branch Type",
             "format": "text"
           },
+          "brandName": {
+            "label": "Brand",
+            "format": "text"
+          },
+          "companyName": {
+            "label": "Company",
+            "format": "text"
+          },
+          "branchAddress": {
+            "label": "Address",
+            "format": "text"
+          },
+          "branchPostcode": {
+            "label": "Postcode",
+            "format": "text"
+          },
+          "branchMainTelephone": {
+            "label": "Main Phone",
+            "format": "text"
+          },
+          "branchLettingsTelephone": {
+            "label": "Lettings Phone",
+            "format": "text"
+          },
+          "branchSummary": {
+            "label": "Branch Summary",
+            "format": "text"
+          },
           "description": {
             "label": "Description",
             "format": "text"
           },
-          "descriptionSales": {
-            "label": "About Sales",
+          "primaryDescriptionHtml": {
+            "label": "Primary Description (HTML)",
             "format": "text"
-          },
-          "descriptionLetting": {
-            "label": "About Letting",
-            "format": "text"
-          },
-          "propertiesForSale": {
-            "label": "Properties for Sale",
-            "format": "number"
-          },
-          "propertiesToLet": {
-            "label": "Properties to Let",
-            "format": "number"
-          },
-          "teamMembers": {
-            "label": "Team Members",
-            "format": "number"
-          },
-          "servicesOffered": {
-            "label": "Services Offered",
-            "format": "array"
           },
           "url": {
             "label": "Profile URL",
@@ -131,6 +133,14 @@
           },
           "logo": {
             "label": "Logo",
+            "format": "link"
+          },
+          "fullBranchLogoUrl": {
+            "label": "Full Logo",
+            "format": "link"
+          },
+          "branchStaticMapImageUrl": {
+            "label": "Map (Static)",
             "format": "link"
           }
         }

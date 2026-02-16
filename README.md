@@ -1,386 +1,163 @@
 # Rightmove Agent Scraper
 
-Extract comprehensive estate agent data from Rightmove, the UK's largest property portal. Scrape estate agents, letting agents, contact details, office addresses, property counts, and extensive agent information with this powerful automation tool.
+Extract estate agent and letting agent data from Rightmove at scale. Collect branch contact details, addresses, brand/company information, and listing descriptions in structured format for analysis, research, and lead generation.
 
-## What does the Rightmove Agent Scraper do?
+## Features
 
-This advanced agent scraper extracts detailed estate agent information from Rightmove.co.uk, providing access to thousands of UK estate agents and letting agents. The scraper collects complete agent profiles, contact information, office locations, property statistics, team details, and services offered.
+- **Agent and branch discovery** — Find agents by location, radius, brand name, and branch type
+- **Profile enrichment** — Collect richer branch and company information from each agent page
+- **Contact details** — Capture phone numbers and branch contact info when available
+- **Business-ready output** — Export to JSON, CSV, Excel, XML, and more
+- **Proxy support** — Improve reliability with built-in proxy configuration
 
-### Key capabilities
+## Use Cases
 
-- **Comprehensive Data Collection** - Extract agent listings with names, phones, emails, addresses, and full profiles
-- **Multiple Search Options** - Search by location, region, radius, branch type (sales/lettings), and brand name
-- **Detailed Agent Information** - Collect full descriptions, contact details, property counts, team members, and services
-- **Smart Data Extraction** - Combines JSON-LD parsing and HTML scraping for maximum data quality
-- **Flexible Filtering** - Filter agents by location, brand name, and branch type
-- **Pagination Support** - Automatically handles multiple pages of search results
-- **Contact Information** - Extract phone numbers, emails, websites, and office addresses
-- **Property Statistics** - Get counts of properties for sale and to let by each agent
-- **Team Details** - Extract information about agent team members
+### Lead generation
+Build targeted agent databases for outreach, partnerships, and marketing campaigns.
 
-## Why use this Rightmove Agent Scraper?
+### Market research
+Compare coverage, positioning, and branch information across locations and brands.
 
-- ✅ **Production Ready** - Battle-tested and optimized for reliability
-- ✅ **Fast & Efficient** - Concurrent processing with intelligent rate limiting
-- ✅ **High-Quality Data** - Structured JSON output with comprehensive agent information
-- ✅ **Easy to Use** - Simple configuration with sensible defaults
-- ✅ **Cost Effective** - Optimized to minimize compute units and proxy usage
-- ✅ **Regularly Maintained** - Updated to adapt to website changes
+### Competitive intelligence
+Track which agents operate in specific regions and how they present their services.
 
-## Use cases
+### Data analysis
+Create structured datasets for BI dashboards, reporting, and internal tools.
 
-### Real Estate Research
-- Market analysis and competitor research
-- Agent coverage mapping
-- Service comparison across regions
-- Industry trend analysis
+## Input Parameters
 
-### Lead Generation
-- Build targeted estate agent databases
-- Identify potential partners or clients
-- Create marketing contact lists
-- Find agents for specific areas
+| Parameter | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `startUrl` | String | No | — | Direct Rightmove “Find an agent” URL. If set, overrides the search parameters below. |
+| `searchLocation` | String | No | `"London"` | Location name used to build the search URL when `startUrl` is not provided. |
+| `locationIdentifier` | String | No | — | Location identifier (for example, a region identifier). Useful for stable searches. |
+| `radius` | String | No | `"0.0"` | Search radius in miles (e.g., `"0.0"`, `"5.0"`, `"10.0"`). |
+| `brandName` | String | No | `""` | Optional brand filter (leave empty for all agents). |
+| `branchType` | String | No | `"ALL"` | Branch type filter: `"ALL"`, `"SALES"`, or `"LETTINGS"`. |
+| `maxResults` | Integer | No | `20` | Maximum number of agents to collect. |
+| `maxPages` | Integer | No | `1` | Maximum number of result pages to process. |
+| `enrichProfiles` | Boolean | No | `false` | Collect additional details from each agent page (slower but richer). |
+| `proxyConfiguration` | Object | No | `{ "useApifyProxy": true }` | Proxy settings for improved reliability. |
 
-### Business Intelligence
-- Competitor monitoring
-- Market entry research
-- Service gap identification
-- Regional market analysis
+## Output Data
 
-### Data & Research
-- Academic research on real estate industry
-- Agent market analysis
-- Service offering trends
-- Geographic coverage studies
-
-## Input Configuration
-
-Configure the scraper using these parameters to customize your agent extraction:
-
-### Search Parameters
-
-| Parameter | Type | Description | Default |
-|-----------|------|-------------|---------|
-| **searchLocation** | String | Location to search (e.g., "London", "Manchester", "Birmingham") | "London" |
-| **locationIdentifier** | String | Rightmove location identifier (e.g., "REGION^87490" for London) | - |
-| **startUrl** | String | Direct Rightmove agent search URL (overrides other search parameters) | - |
-| **radius** | String | Search radius from location: "0.0" to "40.0" miles | "0.0" |
-| **brandName** | String | Filter by specific agent brand name (leave empty for all) | "" |
-| **branchType** | String | Type of branches: "ALL", "SALES", or "LETTINGS" | "ALL" |
-
-### Scraper Control Parameters
-
-| Parameter | Type | Description | Default |
-|-----------|------|-------------|---------|
-| **collectAgentDetails** | Boolean | Visit each agent profile for complete information (slower but comprehensive) | true |
-| **maxResults** | Integer | Maximum number of agents to collect (1-1000) | 50 |
-| **maxPages** | Integer | Maximum number of result pages to process | 5 |
-| **proxyConfiguration** | Object | Proxy settings - residential proxies recommended | `{useApifyProxy: true}` |
-
-## Example Input
-
-```json
-{
-  "searchLocation": "London",
-  "locationIdentifier": "REGION^87490",
-  "radius": "5.0",
-  "brandName": "",
-  "branchType": "ALL",
-  "collectAgentDetails": true,
-  "maxResults": 100,
-  "maxPages": 10,
-  "proxyConfiguration": {
-    "useApifyProxy": true
-  }
-}
-```
-
-## Output Format
-
-The scraper provides structured JSON data for each estate agent:
-
-### Basic Agent Data
-
-```json
-{
-  "agentId": "123456",
-  "name": "ABC Estate Agents, London",
-  "url": "https://www.rightmove.co.uk/estate-agents/agent/ABC-Estate-Agents.html",
-  "phone": "020 1234 5678",
-  "logo": "https://media.rightmove.co.uk/dir/crop/10:9-16:9/193k/192272/logo.png",
-  "branchType": "SALES",
-  "description": "Leading estate agents in central London...",
-  "address": "123 High Street, London, SW1A 1AA",
-  "scrapedAt": "2025-12-23T12:34:56.789Z"
-}
-```
-
-### Detailed Agent Data (when collectAgentDetails=true)
-
-```json
-{
-  "agentId": "123456",
-  "name": "ABC Estate Agents, London",
-  "url": "https://www.rightmove.co.uk/estate-agents/agent/ABC-Estate-Agents.html",
-  "phone": "020 1234 5678",
-  "email": "info@abcestateagents.co.uk",
-  "website": "https://www.abcestateagents.co.uk",
-  "address": "123 High Street, London, SW1A 1AA",
-  "branchType": "SALES",
-  "description": "ABC Estate Agents has been serving central London for over 20 years...",
-  "logo": "https://media.rightmove.co.uk/dir/crop/10:9-16:9/193k/192272/logo.png",
-  "propertiesForSale": 45,
-  "propertiesToLet": 12,
-  "teamMembers": 8,
-  "servicesOffered": ["Sales", "Lettings", "Mortgages", "Valuation"],
-  "extractionMethod": "json-ld",
-  "scrapedAt": "2025-12-23T12:34:56.789Z"
-}
-```
-
-## Dataset Fields
-
-### Core Fields
+Each dataset item contains fields like:
 
 | Field | Type | Description |
-|-------|------|-------------|
-| **agentId** | String | Unique Rightmove agent identifier |
-| **name** | String | Agent/branch name |
-| **url** | String | Direct link to agent profile |
-| **phone** | String | Contact phone number |
-| **logo** | String | Agent logo image URL |
-| **branchType** | String | Branch type (SALES, LETTINGS, or ALL) |
-| **address** | String | Office address |
-| **description** | String | Agent description/about text |
+|------|------|-------------|
+| `agentId` | String | Unique agent/branch identifier. |
+| `name` | String | Agent/branch display name. |
+| `url` | String | Agent page URL. |
+| `branchType` | String | `SALES`, `LETTINGS`, or `ALL` (when both apply). |
+| `phone` | String | Best available phone number based on your `branchType` filter. |
+| `phoneSales` | String | Sales phone (when available). |
+| `phoneLettings` | String | Lettings phone (when available). |
+| `branchAddress` | String | Branch address (when available). |
+| `branchPostcode` | String | Branch postcode (when available). |
+| `companyName` | String | Company name (when available). |
+| `logo` | String | Logo URL (when available). |
+| `description` | String | Description text shown for the branch (when available). |
+| `agentProfile` | Object | Full profile payload captured from the agent page (structure can vary). |
+| `salesPropertiesSummary` | Object | Summary of sales listings (count + search path), when available. |
+| `lettingsPropertiesSummary` | Object | Summary of lettings listings (count + search path), when available. |
+| `scrapedAt` | String | ISO timestamp of when the item was collected. |
 
-### Detailed Fields (when collectAgentDetails=true)
+To keep datasets fast and lightweight, the Actor does not include full property card lists in the output.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| **email** | String | Contact email address |
-| **website** | String | Agent website URL |
-| **propertiesForSale** | Integer | Number of properties currently for sale |
-| **propertiesToLet** | Integer | Number of properties currently to let |
-| **teamMembers** | Integer | Number of team members |
-| **servicesOffered** | Array | List of services offered |
-| **extractionMethod** | String | Data extraction method used (json-ld, html-parse, or basic-card) |
-| **scrapedAt** | String | ISO timestamp of data extraction |
+## Usage Examples
 
-## How to scrape Rightmove agents
+### Basic run
 
-### Step 1: Set up the Actor
-
-1. Create a free Apify account
-2. Find "Rightmove Agent Scraper" in the Apify Store
-3. Click "Try for free"
-
-### Step 2: Configure your search
-
-Enter your search parameters:
-- **Location**: Enter the area you want to search (e.g., "London", "Manchester")
-- **Branch Type**: Select ALL, SALES only, or LETTINGS only
-- **Brand Name**: Optionally filter by specific agent brand
-- **Radius**: Choose search radius from location
-
-### Step 3: Run the scraper
-
-Click "Start" to begin extracting agent data. The scraper will:
-- Search Rightmove with your criteria
-- Extract agent cards from search results
-- Optionally visit each agent profile for detailed information
-- Handle pagination automatically
-- Save all data to the dataset
-
-### Step 4: Download your data
-
-Export your agent data in multiple formats:
-- **JSON** - For programmatic use and API integration
-- **CSV** - For Excel and spreadsheet analysis
-- **Excel** - For direct use in Microsoft Excel
-- **HTML** - For viewing in web browsers
-- **XML** - For data interchange
-
-## Performance & Cost
-
-### Speed
-- **Basic mode** (collectAgentDetails=false): ~100-150 agents per minute
-- **Detailed mode** (collectAgentDetails=true): ~30-50 agents per minute
-
-### Cost Optimization
-- Use specific filters to reduce unnecessary results
-- Set appropriate maxResults limit
-- Use basic mode when detailed information isn't needed
-- Monitor and adjust concurrency settings
-
-### Compute Units
-- Approximately 0.01-0.02 compute units per agent (basic mode)
-- Approximately 0.03-0.05 compute units per agent (detailed mode)
-
-## Best Practices
-
-### Search Strategy
-- Start with specific locations and criteria
-- Use radius filtering to focus on target areas
-- Set realistic maxResults based on your needs
-- Use branch type filter to narrow results
-
-### Data Quality
-- Enable collectAgentDetails for comprehensive information
-- Use residential proxies to avoid blocking
-- Run during off-peak hours for better performance
-- Validate extracted data for completeness
-
-### Rate Limiting
-- The scraper includes built-in delays between requests
-- Proxy rotation helps avoid rate limiting
-- Adjust maxConcurrency based on proxy quality
-- Monitor for blocking and adjust settings if needed
-
-## Limitations
-
-- Respects Rightmove's robots.txt and terms of service
-- Rate limiting applied to prevent server overload
-- Some agents may have restricted access
-- Detailed data extraction increases runtime
-- Requires residential proxies for reliable operation
-
-## Troubleshooting
-
-### No agents found
-- Verify your search location is correct
-- Check if filters are too restrictive
-- Ensure the location has estate agents
-- Try a different radius setting
-
-### Missing data fields
-- Enable collectAgentDetails for complete information
-- Some agents may not have all fields
-- Check if proxies are working correctly
-- Verify the agent profile page is accessible
-
-### Slow performance
-- Reduce maxResults or maxPages
-- Decrease concurrency settings
-- Use faster proxies
-- Disable collectAgentDetails for faster extraction
-
-### Proxy issues
-- Use residential proxies instead of datacenter
-- Ensure Apify proxy is enabled
-- Check proxy configuration
-- Try rotating proxy regions
-
-## Integration & API
-
-### Apify API
-Access your scraped data via Apify API:
-
-```javascript
-// Get dataset items
-const client = new ApifyClient({
-    token: 'YOUR_API_TOKEN'
-});
-
-const run = await client.actor('YOUR_ACTOR_ID').call(inputConfig);
-const dataset = await client.dataset(run.defaultDatasetId).listItems();
-```
-
-### Webhooks
-Set up webhooks to get notified when scraping completes:
-- Run succeeded
-- Run failed
-- Run aborted
-
-### Scheduling
-Schedule regular scraping runs:
-- Daily agent updates
-- Weekly market analysis
-- Monthly trend reports
-- Custom schedules
-
-## Legal & Compliance
-
-### Terms of Use
-- This scraper is for personal and research use
-- Respect Rightmove's terms of service
-- Do not use for unauthorized commercial purposes
-- Comply with data protection regulations (GDPR, etc.)
-- Use responsibly with appropriate rate limiting
-
-### Data Usage
-- Scraped data is for legitimate use only
-- Do not republish copyrighted content
-- Respect intellectual property rights
-- Follow fair use guidelines
-- Comply with applicable laws and regulations
-
-## FAQ
-
-### What data can I extract?
-You can extract agent names, contact details (phone, email, website), office addresses, branch types, property counts, team information, and services offered.
-
-### How many agents can I scrape?
-You can scrape up to 1000 agents per run. For larger datasets, run multiple searches or increase maxPages.
-
-### Why use proxies?
-Rightmove implements rate limiting. Residential proxies help avoid blocking and ensure reliable data extraction.
-
-### Is this legal?
-Web scraping for personal research is generally legal. However, always review and comply with Rightmove's terms of service and applicable laws.
-
-### How often should I scrape?
-It depends on your needs. Weekly or monthly scraping is common for market monitoring and agent database updates.
-
-### Can I export to my database?
-Yes! Use Apify's API to integrate with your database or use webhooks to trigger data transfer automatically.
-
-## Keywords
-
-rightmove scraper, agent scraper uk, estate agents scraper, rightmove agent data, uk estate agents, letting agents scraper, agent listings scraper, agent contact scraper, rightmove api alternative, estate agent data, real estate automation, agent research tool, uk agent data, agent market data, rightmove crawler, estate agent extraction, agent database tool, real estate agents scraper
-
----
-
-## Example Use Cases
-
-### London Estate Agents Database
 ```json
 {
   "searchLocation": "London",
   "radius": "0.0",
-  "branchType": "SALES",
-  "collectAgentDetails": true,
-  "maxResults": 200
+  "branchType": "ALL",
+  "maxResults": 20,
+  "maxPages": 1,
+  "proxyConfiguration": { "useApifyProxy": true }
 }
 ```
 
-### Letting Agents in Manchester
-```json
-{
-  "searchLocation": "Manchester",
-  "radius": "5.0",
-  "branchType": "LETTINGS",
-  "collectAgentDetails": true,
-  "maxResults": 100
-}
-```
+### Filter by brand
 
-### Specific Brand Analysis
 ```json
 {
   "locationIdentifier": "REGION^87490",
   "brandName": "Foxtons",
   "radius": "10.0",
-  "collectAgentDetails": true,
-  "maxResults": 50
+  "branchType": "ALL",
+  "maxResults": 50,
+  "maxPages": 3
 }
 ```
 
----
+### Lettings only
 
-<p align="center">
-  Made with ❤️ for real estate professionals, marketers, and researchers
-</p>
+```json
+{
+  "searchLocation": "London",
+  "radius": "5.0",
+  "branchType": "LETTINGS",
+  "maxResults": 100,
+  "maxPages": 5
+}
+```
 
-<p align="center">
-  <strong>Start scraping Rightmove agents today!</strong>
-</p>
+## Sample Output
+
+```json
+{
+  "agentId": "26267",
+  "name": "Abacus Estates, West Hampstead, London",
+  "url": "https://www.rightmove.co.uk/estate-agents/agent/Abacus-Estates/West-Hampstead-London-26267.html",
+  "branchType": "ALL",
+  "phone": "020 3815 5777",
+  "branchAddress": "303 West End Lane, West Hampstead, London, NW6 1RD",
+  "branchPostcode": "NW6 1RD",
+  "companyName": "Abacus Estates",
+  "logo": "https://media.rightmove.co.uk/dir/company/clogo_10577_0006.jpeg",
+  "scrapedAt": "2026-02-16T13:34:54.766Z"
+}
+```
+
+## Tips for Best Results
+
+### Start small
+- Begin with `maxResults: 20` and `maxPages: 1` to validate your filters.
+
+### Use stable identifiers
+- Prefer `locationIdentifier` when you want repeatable, stable searches.
+
+### Use proxies
+- Residential proxies generally provide the best reliability for consistent extraction.
+
+## Proxy Configuration
+
+```json
+{
+  "proxyConfiguration": {
+    "useApifyProxy": true,
+    "apifyProxyGroups": ["RESIDENTIAL"]
+  }
+}
+```
+
+## Integrations
+
+- **Google Sheets** — Export and analyze agent lists
+- **Airtable** — Build searchable directories
+- **Webhooks** — Trigger downstream workflows on run completion
+- **Make** — Automate enrichment, alerts, and reporting
+- **Zapier** — Connect to CRM and marketing tools
+
+## Frequently Asked Questions
+
+### Why do some items have more fields than others?
+Rightmove pages can expose different information depending on the agent and branch. This Actor captures the available data for each agent, and the `agentProfile` object may differ between branches.
+
+### How many agents can I collect?
+You can collect up to 500 agents per run using `maxResults`.
+
+### What should I do if results are empty?
+Try reducing filters, using a different radius, and enabling proxy configuration for better reliability.
