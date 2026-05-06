@@ -4,6 +4,8 @@
   "title": "Rightmove Agent Scraper",
   "version": "1.0",
   "buildTag": "latest",
+  "minMemoryMbytes": 512,
+  "maxMemoryMbytes": 1024,
   "dockerfile": "./Dockerfile",
   "readme": "./README.md",
   "input": "./input_schema.json",
@@ -14,8 +16,5 @@
   },
   "categories": [
     "REAL_ESTATE"
-  ],
-  "meta": {
-    "generatedBy": "GPT-5.3-Codex"
-  }
+  ]
 }

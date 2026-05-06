@@ -215,10 +215,8 @@ const buildRightmoveLogoUrl = (logoPath) => {
 
     // Rightmove agent JSON often uses media paths like "/34k/33248/branch_logo_...png"
     // These are served from media.rightmove.co.uk (not www.rightmove.co.uk)
-    if (logoPath.startsWith("/")) {
-        return `https://media.rightmove.co.uk/dir${logoPath}`;
-    }
-    return `https://media.rightmove.co.uk/dir/${logoPath}`;
+    const cleanPath = logoPath.startsWith("/") ? logoPath : `/${logoPath}`;
+    return `https://media.rightmove.co.uk${cleanPath}`;
 };
 
 const buildSearchUrl = (input) => {
