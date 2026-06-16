@@ -64,6 +64,15 @@ const cleanText = (text) => {
     return cleaned.length > 0 ? cleaned : null;
 };
 
+const cleanRichText = (text) => {
+    if (!text) return null;
+    const withoutTags = String(text)
+        .replace(/<br\s*\/?>/gi, " ")
+        .replace(/<\/p\s*>/gi, " ")
+        .replace(/<[^>]+>/g, " ");
+    return cleanText(withoutTags);
+};
+
 const parseOptionalPositiveInteger = (value) => {
     if (value === null || value === undefined || value === "") return null;
     const parsed = Number.parseInt(String(value), 10);
@@ -131,28 +140,11 @@ const pruneNullishDeep = (value) => {
     return value;
 };
 
-const compactAgentProfile = (apr) => {
-    if (!apr || typeof apr !== "object") return null;
-
-    // These objects can be very large because they may include full property cards.
-    // Keep the profile useful, but remove heavy lists to keep dataset size reasonable.
-    const clone = typeof structuredClone === "function" ? structuredClone(apr) : JSON.parse(JSON.stringify(apr));
-
-    // Remove bulky property lists (user asked specifically to remove sale properties).
-    delete clone.salesProperties;
-    delete clone.lettingsProperties;
-
-    // Defensive: remove nested `properties` arrays if they appear under other keys.
-    if (clone.salesProperties?.properties) delete clone.salesProperties.properties;
-    if (clone.lettingsProperties?.properties) delete clone.lettingsProperties.properties;
-
-    return pruneNullishDeep(clone);
-};
-
 const ensureAbsoluteUrl = (url) => {
     if (!url) return null;
     if (url.startsWith("http")) return url;
     if (url.startsWith("//")) return `https:${url}`;
+    if (url.startsWith("/partner-logo/")) return `https://media.rightmove.co.uk${url}`;
     return `${BASE_URL}${url.startsWith("/") ? "" : "/"}${url}`;
 };
 
@@ -302,12 +294,28 @@ const findDeepObject = (root, predicate, { maxNodes = 5000 } = {}) => {
 
 const buildRightmoveLogoUrl = (logoPath) => {
     if (!logoPath) return null;
-    if (logoPath.startsWith("http")) return logoPath;
+    if (logoPath.startsWith("http")) {
+        return logoPath.replace("https://www.rightmove.co.uk/partner-logo/", "https://media.rightmove.co.uk/partner-logo/");
+    }
 
     // Rightmove agent JSON often uses media paths like "/34k/33248/branch_logo_...png"
     // These are served from media.rightmove.co.uk (not www.rightmove.co.uk)
     const cleanPath = logoPath.startsWith("/") ? logoPath : `/${logoPath}`;
     return `https://media.rightmove.co.uk${cleanPath}`;
+};
+
+const pickCleanDescription = (...values) => {
+    for (const value of values) {
+        const cleaned = cleanRichText(value);
+        if (cleaned) return cleaned;
+    }
+    return null;
+};
+
+const sameNormalizedText = (left, right) => {
+    const a = cleanRichText(left)?.toLowerCase();
+    const b = cleanRichText(right)?.toLowerCase();
+    return !!a && !!b && a === b;
 };
 
 const resolveLocationIdentifier = async (searchLocation, proxyConfig) => {
@@ -463,6 +471,14 @@ const normalizeProfileData = (apr) => {
           })
         : null;
 
+    const description = pickCleanDescription(
+        apr.branchDescription,
+        apr.primaryDescription,
+        apr.lettingsPrimaryDescription,
+        apr.branchSummary
+    );
+    const branchSummary = cleanRichText(apr.branchSummary);
+
     return {
         branchId: apr.branchId != null ? String(apr.branchId) : null,
         companyId: apr.companyId != null ? String(apr.companyId) : null,
@@ -477,19 +493,15 @@ const normalizeProfileData = (apr) => {
         branchMainTelephone: cleanText(apr.branchMainTelephone),
         branchLettingsTelephone: cleanText(apr.branchLettingsTelephone),
 
-        branchLogoUrl: ensureAbsoluteUrl(apr.branchLogoUrl),
-        fullBranchLogoUrl: ensureAbsoluteUrl(apr.fullBranchLogoUrl),
-        brandLogoUrl: buildRightmoveLogoUrl(apr.brandLogoPath),
+        logo: buildRightmoveLogoUrl(apr.fullBranchLogoUrl || apr.branchLogoUrl || apr.brandLogoPath),
         branchStaticMapImageUrl: ensureAbsoluteUrl(apr.branchStaticMapImageUrl),
 
         companyName: cleanText(apr.companyName),
         companyTradingName: cleanText(apr.companyTradingName),
         companyTypeAlias: cleanText(apr.companyTypeAlias),
 
-        branchSummaryProfile: cleanText(apr.branchSummary),
-        branchDescription: cleanText(apr.branchDescription),
-        primaryDescription: cleanText(apr.primaryDescription),
-        lettingsPrimaryDescription: cleanText(apr.lettingsPrimaryDescription),
+        branchSummary: sameNormalizedText(branchSummary, description) ? null : branchSummary,
+        description,
 
         branchProfileUrl: ensureAbsoluteUrl(apr.branchProfilePath),
         lettingsSearchUrl: ensureAbsoluteUrl(apr.lettingsSearchPath),
@@ -526,6 +538,9 @@ const normalizeSearchAgent = (item, inputBranchType = "ALL") => {
     else if (inputBranchType === "LETTINGS") phone = phoneLettings || fallbackPhone || phoneSales;
     else phone = fallbackPhone || phoneSales || phoneLettings;
 
+    const description = pickCleanDescription(item?.description, item?.primaryDescription, item?.microsite?.descriptionSummary);
+    const branchSummary = cleanRichText(item?.branchSummary);
+
     return {
         agentId,
         name: cleanText(item?.branchDisplayName || item?.name || item?.brandName),
@@ -537,11 +552,9 @@ const normalizeSearchAgent = (item, inputBranchType = "ALL") => {
         branchType,
 
         brandName: cleanText(item?.brandName),
-        branchSummary: cleanText(item?.branchSummary),
-        description: cleanText(item?.description),
-        primaryDescriptionHtml: cleanText(item?.primaryDescription),
+        branchSummary: sameNormalizedText(branchSummary, description) ? null : branchSummary,
+        description,
 
-        micrositeDescriptionSummary: cleanText(item?.microsite?.descriptionSummary),
         micrositeHomeLink: ensureAbsoluteUrl(item?.microsite?.homeLink?.href),
         micrositeTabLinks: Array.isArray(item?.microsite?.tabLinks)
             ? item.microsite.tabLinks.map((t) => ({
@@ -596,12 +609,10 @@ const fetchProfileRecord = async ({ listingAgent, proxyConfig, referer }) => {
         const html = await fetchText({ url: listingAgent.url, proxyConfig, referer });
         const apr = extractAgentProfileResponseFromProfileHtml(html);
         const profile = normalizeProfileData(apr);
-        const agentProfile = compactAgentProfile(apr);
 
         return pruneNullishDeep({
             ...listingAgent,
             ...profile,
-            agentProfile,
             scrapedAt: new Date().toISOString(),
             extractionMethod: "next-data",
         });
