@@ -1,7 +1,8 @@
 import { Actor, log } from "apify";
-import { Dataset, HttpCrawler } from "crawlee";
+import { Dataset } from "crawlee";
+import { gotScraping } from "got-scraping";
 
-log.setLevel(log.LEVELS.WARNING);
+log.setLevel(log.LEVELS.INFO);
 
 // ============================================================================
 // CONSTANTS & CONFIGURATION
@@ -9,6 +10,8 @@ log.setLevel(log.LEVELS.WARNING);
 
 const BASE_URL = "https://www.rightmove.co.uk";
 const DEFAULT_SEARCH_URL = `${BASE_URL}/estate-agents/find.html`;
+const RIGHTMOVE_HOME_URL = `${BASE_URL}/`;
+const TYPEAHEAD_BASE_URL = "https://los.rightmove.co.uk/typeahead";
 
 const UK_REGIONS = {
     london: "REGION^87490",
@@ -23,58 +26,37 @@ const UK_REGIONS = {
     belfast: "REGION^5882",
 };
 
-const USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-];
-
-const STEALTHY_HEADERS = {
+const RIGHTMOVE_NAVIGATION_HEADERS = {
     Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
-    DNT: "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
     "Cache-Control": "max-age=0",
     Pragma: "no-cache",
-    "Sec-Ch-Ua": '"Chromium";v="124", "Not;A=Brand";v="8"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
 };
 
-const REQUEST_DELAY_MS = 0;
-const REQUEST_JITTER = 50;
-const MAX_RETRIES = 3;
+const RIGHTMOVE_HEADER_GENERATOR_OPTIONS = {
+    browsers: [
+        { name: "chrome", minVersion: 122, maxVersion: 126 },
+        { name: "firefox", minVersion: 123, maxVersion: 127 },
+    ],
+    devices: ["desktop"],
+    locales: ["en-GB", "en-US"],
+    operatingSystems: ["windows", "macos", "linux"],
+};
+
 const DEFAULT_AGENTS_PER_PAGE = 20;
-const DATASET_BATCH_SIZE = 15;
+const DATASET_BATCH_SIZE = DEFAULT_AGENTS_PER_PAGE;
 const TIMEOUT_SECONDS = 60;
-
-const toUtf8String = (body) => {
-    if (!body) return "";
-    if (typeof body === "string") return body;
-    if (Buffer.isBuffer(body)) return body.toString("utf-8");
-    return String(body);
-};
+const PROFILE_CONCURRENCY = 8;
+const MAX_EXPANSION_DEPTH = 4;
+const MAX_SEARCH_PAGES_PER_SEED = 250;
 
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
-
-const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-
-const getRandomDelay = () => REQUEST_DELAY_MS + Math.random() * REQUEST_JITTER;
-
-const sleep = (ms) =>
-    new Promise((resolve) => {
-        setTimeout(resolve, ms);
-    });
 
 const cleanText = (text) => {
     if (!text) return null;
@@ -86,6 +68,15 @@ const parseOptionalPositiveInteger = (value) => {
     if (value === null || value === undefined || value === "") return null;
     const parsed = Number.parseInt(String(value), 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+const flushAgentDataBatch = async (agentDataBatch, { force = false, onFlush = async () => {} } = {}) => {
+    while (agentDataBatch.length >= DATASET_BATCH_SIZE || (force && agentDataBatch.length > 0)) {
+        const chunkSize = force ? agentDataBatch.length : DATASET_BATCH_SIZE;
+        const toPush = agentDataBatch.splice(0, chunkSize);
+        await Dataset.pushData(toPush);
+        await onFlush(toPush);
+    }
 };
 
 const pruneNullishDeep = (value) => {
@@ -165,6 +156,100 @@ const ensureAbsoluteUrl = (url) => {
     return `${BASE_URL}${url.startsWith("/") ? "" : "/"}${url}`;
 };
 
+const normalizeReferer = (url) => ensureAbsoluteUrl(url) || RIGHTMOVE_HOME_URL;
+
+const buildRightmoveRequestHeaders = ({ referer }) => ({
+    ...RIGHTMOVE_NAVIGATION_HEADERS,
+    Origin: BASE_URL,
+    Referer: normalizeReferer(referer),
+});
+
+const getProxyUrl = async (proxyConfig) => {
+    if (!proxyConfig) return undefined;
+    return proxyConfig.newUrl();
+};
+
+const fetchText = async ({ url, proxyConfig, referer = RIGHTMOVE_HOME_URL, accept = RIGHTMOVE_NAVIGATION_HEADERS.Accept }) => {
+    const proxyUrl = await getProxyUrl(proxyConfig);
+    const response = await gotScraping({
+        url,
+        proxyUrl,
+        responseType: "text",
+        timeout: { request: TIMEOUT_SECONDS * 1000 },
+        retry: { limit: 0 },
+        headerGeneratorOptions: RIGHTMOVE_HEADER_GENERATOR_OPTIONS,
+        headers: {
+            ...buildRightmoveRequestHeaders({ referer }),
+            Accept: accept,
+        },
+    });
+
+    return response.body;
+};
+
+const fetchJson = async ({ url, proxyConfig, referer = RIGHTMOVE_HOME_URL }) => {
+    const proxyUrl = await getProxyUrl(proxyConfig);
+    const response = await gotScraping({
+        url,
+        proxyUrl,
+        responseType: "json",
+        timeout: { request: TIMEOUT_SECONDS * 1000 },
+        retry: { limit: 0 },
+        headerGeneratorOptions: RIGHTMOVE_HEADER_GENERATOR_OPTIONS,
+        headers: {
+            ...buildRightmoveRequestHeaders({ referer }),
+            Accept: "application/json, text/plain, */*",
+        },
+    });
+
+    return response.body;
+};
+
+const chunkArray = (items, size) => {
+    const chunks = [];
+    for (let index = 0; index < items.length; index += size) {
+        chunks.push(items.slice(index, index + size));
+    }
+    return chunks;
+};
+
+const normalizeSearchSeedUrl = (url) => {
+    try {
+        const parsed = new URL(url, BASE_URL);
+        parsed.hash = "";
+        return parsed.toString();
+    } catch {
+        return url;
+    }
+};
+
+const extractSidebarEstateAgentLinks = (results, currentUrl) => {
+    const sidebarGroups = Array.isArray(results?.agentsData?.sidebar) ? results.agentsData.sidebar : [];
+    const currentPath = new URL(currentUrl).pathname.toLowerCase();
+    const withinGroups = sidebarGroups.filter((group) => /within/i.test(group?.heading || ""));
+    const candidateGroups = withinGroups.length > 0 ? withinGroups : sidebarGroups;
+
+    return [...new Set(
+        candidateGroups
+            .flatMap((group) => (Array.isArray(group?.links) ? group.links : []))
+            .map((link) => ensureAbsoluteUrl(link?.href))
+            .filter((href) => href && href.includes("/estate-agents/"))
+            .filter((href) => {
+                try {
+                    return new URL(href).pathname.toLowerCase() !== currentPath;
+                } catch {
+                    return false;
+                }
+            })
+    )];
+};
+
+const shouldExpandSearchSeed = ({ totalAgents, sidebarLinks, depth, maxResults }) => {
+    if (!sidebarLinks.length || depth >= MAX_EXPANSION_DEPTH) return false;
+    if (maxResults !== null && maxResults <= 1000) return false;
+    return totalAgents !== null && totalAgents > 1000;
+};
+
 const extractAgentId = (url) => {
     if (!url) return null;
     // Extract agent ID from URLs like /estate-agents/agent/YYYY/branch-name.html or /branch-view/YYYY
@@ -225,24 +310,40 @@ const buildRightmoveLogoUrl = (logoPath) => {
     return `https://media.rightmove.co.uk${cleanPath}`;
 };
 
-const buildSearchUrl = (input) => {
+const resolveLocationIdentifier = async (searchLocation, proxyConfig) => {
+    if (!searchLocation) return null;
+
+    const locationKey = searchLocation.toLowerCase().trim();
+    if (UK_REGIONS[locationKey]) return UK_REGIONS[locationKey];
+
+    const query = searchLocation.replace(/[,()[\]{}]/g, "").toUpperCase();
+    const url = `${TYPEAHEAD_BASE_URL}?query=${encodeURIComponent(query)}&limit=10&exclude=STREET`;
+
+    try {
+        const response = await fetchJson({
+            url,
+            proxyConfig,
+            referer: RIGHTMOVE_HOME_URL,
+        });
+        const matches = Array.isArray(response?.matches) ? response.matches : [];
+        const exactMatch = matches.find((match) => match?.displayName?.toLowerCase() === searchLocation.toLowerCase());
+        const selected = exactMatch || matches[0];
+        return selected?.id && selected?.type ? `${selected.type}^${selected.id}` : searchLocation;
+    } catch (error) {
+        log.info(`Typeahead lookup failed for "${searchLocation}": ${error.message}`);
+        return searchLocation;
+    }
+};
+
+const buildSearchUrl = async (input, proxyConfig) => {
     if (input.startUrl) return input.startUrl;
     const params = new URLSearchParams();
 
     if (input.locationIdentifier) {
         params.append("locationIdentifier", input.locationIdentifier);
     } else if (input.searchLocation) {
-        // Try to map searchLocation to UK_REGIONS
-        const locationKey = input.searchLocation.toLowerCase().trim();
-        const regionId = UK_REGIONS[locationKey];
-
-        if (regionId) {
-            // Found matching region, use locationIdentifier
-            params.append("locationIdentifier", regionId);
-        } else {
-            // For unrecognized locations, try as-is (might be postcode/custom identifier)
-            params.append("locationIdentifier", input.searchLocation);
-        }
+        const resolvedLocationIdentifier = await resolveLocationIdentifier(input.searchLocation, proxyConfig);
+        params.append("locationIdentifier", resolvedLocationIdentifier || input.searchLocation);
     } else {
         // Default to London
         params.append("locationIdentifier", UK_REGIONS.london);
@@ -466,6 +567,12 @@ const hasNextSearchPage = ({ pagination, rawAgents, pageNumber, maxPages, newAge
     const hasNextPageFlag = pagination?.hasNextPage;
     if (typeof hasNextPageFlag === "boolean") return hasNextPageFlag;
 
+    const indexLastAgent = parseOptionalPositiveInteger(pagination?.indexLastAgent);
+    const totalAgents = parseOptionalPositiveInteger(
+        pagination?.totalAgents ?? pagination?.numberOfAgents ?? pagination?.totalResults ?? pagination?.totalCount ?? pagination?.total
+    );
+    if (indexLastAgent !== null && totalAgents !== null) return indexLastAgent < totalAgents;
+
     const totalPages = parseOptionalPositiveInteger(
         pagination?.totalPages ?? pagination?.pageCount ?? pagination?.numberOfPages
     );
@@ -473,13 +580,39 @@ const hasNextSearchPage = ({ pagination, rawAgents, pageNumber, maxPages, newAge
         parseOptionalPositiveInteger(pagination?.currentPage ?? pagination?.pageNumber ?? pagination?.page) || pageNumber;
     if (totalPages !== null) return currentPage < totalPages;
 
-    const indexLastAgent = parseOptionalPositiveInteger(pagination?.indexLastAgent);
-    const totalAgents = parseOptionalPositiveInteger(
-        pagination?.totalAgents ?? pagination?.numberOfAgents ?? pagination?.totalResults ?? pagination?.totalCount
-    );
-    if (indexLastAgent !== null && totalAgents !== null) return indexLastAgent < totalAgents;
-
     return rawAgents.length >= DEFAULT_AGENTS_PER_PAGE;
+};
+
+const fetchSearchResultsPage = async ({ url, proxyConfig, referer }) => {
+    const html = await fetchText({ url, proxyConfig, referer });
+    const { agents, pagination } = extractAgentsFromSearchHtml(html);
+    const nextData = extractNextDataFromHtml(html);
+    const results = nextData?.props?.pageProps?.data?.results || null;
+    return { agents, pagination, results };
+};
+
+const fetchProfileRecord = async ({ listingAgent, proxyConfig, referer }) => {
+    try {
+        const html = await fetchText({ url: listingAgent.url, proxyConfig, referer });
+        const apr = extractAgentProfileResponseFromProfileHtml(html);
+        const profile = normalizeProfileData(apr);
+        const agentProfile = compactAgentProfile(apr);
+
+        return pruneNullishDeep({
+            ...listingAgent,
+            ...profile,
+            agentProfile,
+            scrapedAt: new Date().toISOString(),
+            extractionMethod: "next-data",
+        });
+    } catch (error) {
+        log.info(`Profile fallback for ${listingAgent.url}: ${error.message}`);
+        return pruneNullishDeep({
+            ...listingAgent,
+            scrapedAt: new Date().toISOString(),
+            extractionMethod: "next-data",
+        });
+    }
 };
 
 
@@ -505,211 +638,239 @@ try {
     } = input;
     const maxResults = parseOptionalPositiveInteger(inputMaxResults);
     const maxPages = parseOptionalPositiveInteger(inputMaxPages);
+    const proxyConfig = input.proxyConfiguration
+        ? await Actor.createProxyConfiguration(input.proxyConfiguration)
+        : undefined;
 
-    const searchUrl = buildSearchUrl({ startUrl, searchLocation, locationIdentifier, radius, brandName, branchType });
+    const searchUrl = await buildSearchUrl(
+        { startUrl, searchLocation, locationIdentifier, radius, brandName, branchType },
+        proxyConfig
+    );
 
-    log.warning("Starting Rightmove Agent Scraper");
-    log.warning(`Search URL: ${searchUrl}`);
-    log.warning(
+    log.info("Starting Rightmove Agent Scraper");
+    log.info(`Search URL: ${searchUrl}`);
+    log.info(
         `Config: maxResults=${maxResults ?? "unbounded"}, maxPages=${maxPages ?? "unbounded"}, branchType=${branchType || "ALL"}, enrichProfiles=${enrichProfiles}`
     );
 
     let agentsScraped = 0;
+    let searchPagesProcessed = 0;
+    let flushedBatchCount = 0;
+    let maxReportedTotalAgents = 0;
+    let repeatedLastPageDetected = false;
+    let lastStopReason = "results_exhausted";
+    let expandedSeedCount = 0;
+
     const agentIds = new Set();
     const pushedAgentIds = new Set();
     const agentDataBatch = [];
+    const visitedSearchSeeds = new Set();
+    const queuedSearchSeeds = new Set([normalizeSearchSeedUrl(searchUrl)]);
+    const searchSeedQueue = [{ url: normalizeSearchSeedUrl(searchUrl), depth: 0, referer: RIGHTMOVE_HOME_URL }];
 
-    let searchPagesProcessed = 0;
+    const pushBatch = async () => {
+        await flushAgentDataBatch(agentDataBatch, {
+            onFlush: async (toPush) => {
+                flushedBatchCount += 1;
+                log.info(`Pushed batch ${flushedBatchCount}: ${toPush.length} agents`);
+            },
+        });
+    };
 
-    const proxyConfig = input.proxyConfiguration
-        ? await Actor.createProxyConfiguration(input.proxyConfiguration)
-        : await Actor.createProxyConfiguration();
+    const bufferAgents = async (records) => {
+        for (const record of records) {
+            if (!record?.agentId) continue;
+            if (pushedAgentIds.has(String(record.agentId))) continue;
+            pushedAgentIds.add(String(record.agentId));
+            agentDataBatch.push(record);
+        }
 
-    const crawler = new HttpCrawler({
-        proxyConfiguration: proxyConfig,
-        requestHandlerTimeoutSecs: TIMEOUT_SECONDS,
-        maxRequestRetries: MAX_RETRIES,
-        maxConcurrency: 15,
-        useSessionPool: true,
+        if (agentDataBatch.length >= DATASET_BATCH_SIZE) await pushBatch();
+    };
 
-        async requestHandler({ request, body }) {
-            const { url, userData } = request;
-            const requestType = userData?.type || "SEARCH";
+    const processLeafPageRecords = async (listingAgents, referer) => {
+        if (!listingAgents.length) return;
+
+        if (!enrichProfiles) {
+            const finalAgents = listingAgents.map((listingAgent) =>
+                pruneNullishDeep({
+                    ...listingAgent,
+                    scrapedAt: new Date().toISOString(),
+                    extractionMethod: "next-data",
+                })
+            );
+            await bufferAgents(finalAgents);
+            return;
+        }
+
+        for (const chunk of chunkArray(listingAgents, PROFILE_CONCURRENCY)) {
+            const enrichedAgents = await Promise.all(
+                chunk.map((listingAgent) => fetchProfileRecord({ listingAgent, proxyConfig, referer }))
+            );
+            await bufferAgents(enrichedAgents);
+        }
+    };
+
+    while (searchSeedQueue.length > 0 && !hasReachedLimit(agentsScraped, maxResults)) {
+        const seed = searchSeedQueue.shift();
+        const seedUrl = normalizeSearchSeedUrl(seed.url);
+        if (visitedSearchSeeds.has(seedUrl)) continue;
+        visitedSearchSeeds.add(seedUrl);
+
+        let currentUrl = seedUrl;
+        let pageNumber = 1;
+        let pagesWithinSeed = 0;
+        let currentReferer = seed.referer || RIGHTMOVE_HOME_URL;
+        while (!hasReachedLimit(agentsScraped, maxResults)) {
+            let pageData;
             try {
-                if (requestType === "SEARCH") {
-                    searchPagesProcessed += 1;
-
-                    const html = toUtf8String(body);
-
-                    // Extract structured agent list from embedded Next.js __NEXT_DATA__
-                    const { agents: rawAgents, pagination } = extractAgentsFromSearchHtml(html);
-                    if (!rawAgents.length) {
-                        log.warning("  ⚠ No agents found in structured page data (blocked or markup changed)");
-                    }
-
-                    let newAgentsFound = 0;
-                    for (const raw of rawAgents) {
-                        if (hasReachedLimit(agentsScraped, maxResults)) break;
-
-                        const listingAgent = normalizeSearchAgent(raw, branchType);
-                        if (!listingAgent?.agentId || !listingAgent?.url) continue;
-
-                        if (agentIds.has(listingAgent.agentId)) continue;
-                        agentIds.add(listingAgent.agentId);
-                        agentsScraped += 1;
-                        newAgentsFound += 1;
-
-                        if (!enrichProfiles) {
-                            const finalAgent = pruneNullishDeep({
-                                ...listingAgent,
-                                scrapedAt: new Date().toISOString(),
-                            });
-                            pushedAgentIds.add(String(listingAgent.agentId));
-                            if (finalAgent && Object.keys(finalAgent).length > 0) agentDataBatch.push(finalAgent);
-                            continue;
-                        }
-
-                        await crawler.addRequests([
-                            {
-                                url: listingAgent.url,
-                                userData: {
-                                    type: "PROFILE",
-                                    agentId: listingAgent.agentId,
-                                    listingAgent,
-                                },
-                                headers: { ...STEALTHY_HEADERS, "User-Agent": getRandomUserAgent() },
-                            },
-                        ]);
-                    }
-
-                    if (!enrichProfiles && agentDataBatch.length >= DATASET_BATCH_SIZE) {
-                        const toPush = agentDataBatch.splice(0, agentDataBatch.length);
-                        await Dataset.pushData(toPush);
-                        log.warning(`Pushed ${toPush.length} agents (total ${pushedAgentIds.size})`);
-                    }
-
-                    // Handle pagination (search pages only)
-                    const pageNumber = userData?.pageNumber || 1;
-                    if (
-                        !hasReachedLimit(agentsScraped, maxResults)
-                        && hasNextSearchPage({ pagination, rawAgents, pageNumber, maxPages, newAgentsFound })
-                    ) {
-                        const urlObj = new URL(url);
-                        const currentIndex = parseInt(urlObj.searchParams.get("index") || "0", 10) || 0;
-
-                        const indexFirstAgent = pagination?.indexFirstAgent ?? null;
-                        const indexLastAgent = pagination?.indexLastAgent ?? null;
-                        const inferredPageSize =
-                            typeof indexFirstAgent === "number" && typeof indexLastAgent === "number"
-                                ? Math.max(1, indexLastAgent - indexFirstAgent + 1)
-                                : null;
-                        const pageSize = inferredPageSize || (rawAgents?.length || DEFAULT_AGENTS_PER_PAGE);
-
-                        const nextIndex = currentIndex + pageSize;
-                        urlObj.searchParams.set("index", String(nextIndex));
-                        const nextUrl = urlObj.toString();
-
-                        await crawler.addRequests([
-                            {
-                                url: nextUrl,
-                                userData: { type: "SEARCH", pageNumber: pageNumber + 1 },
-                                headers: { ...STEALTHY_HEADERS, "User-Agent": getRandomUserAgent() },
-                            },
-                        ]);
-                    }
-
-                    if (getRandomDelay() > 0) await sleep(getRandomDelay());
-                    return;
-                }
-
-                if (requestType === "PROFILE") {
-                    const html = toUtf8String(body);
-                    const listingAgent = userData?.listingAgent || null;
-                    const agentId = userData?.agentId || listingAgent?.agentId || extractAgentId(url);
-
-                    const apr = extractAgentProfileResponseFromProfileHtml(html);
-                    const profile = normalizeProfileData(apr);
-                    const agentProfile = compactAgentProfile(apr);
-
-                    const finalAgent = pruneNullishDeep({
-                        ...listingAgent,
-                        ...profile,
-                        agentProfile,
-                        scrapedAt: new Date().toISOString(),
-                        extractionMethod: "next-data",
-                    });
-
-                    if (agentId) pushedAgentIds.add(String(agentId));
-                    if (finalAgent && Object.keys(finalAgent).length > 0) {
-                        agentDataBatch.push(finalAgent);
-                    }
-
-                    if (agentDataBatch.length >= DATASET_BATCH_SIZE) {
-                        const toPush = agentDataBatch.splice(0, agentDataBatch.length);
-                        await Dataset.pushData(toPush);
-                        log.warning(`Pushed ${toPush.length} agents (total ${pushedAgentIds.size})`);
-                    }
-
-                    if (getRandomDelay() > 0) await sleep(getRandomDelay());
-                }
+                pageData = await fetchSearchResultsPage({
+                    url: currentUrl,
+                    proxyConfig,
+                    referer: currentReferer,
+                });
             } catch (error) {
-                log.error(`Handler error: ${error.message}`);
-                throw error;
+                log.info(`Retrying ${currentUrl} after fetch error: ${error.message}`);
+                lastStopReason = "search_fetch_failed";
+                break;
             }
-        },
 
-        errorHandler: async ({ request }) => {
-            log.warning(`Failed: ${request.url} (retries: ${request.retryCount}/${MAX_RETRIES})`);
-        },
+            searchPagesProcessed += 1;
+            pagesWithinSeed += 1;
 
-        // Last-resort fallback: if a profile page fails after retries, push the listing-only data
-        // so the dataset is not missing rows.
-        failedRequestHandler: async ({ request }) => {
-            const { userData } = request;
-            if (userData?.type !== "PROFILE") return;
+            const { agents: rawAgents, pagination, results } = pageData;
+            const reportedTotalAgents = parseOptionalPositiveInteger(
+                pagination?.totalAgents
+                ?? pagination?.numberOfAgents
+                ?? pagination?.totalResults
+                ?? pagination?.totalCount
+                ?? pagination?.total
+                ?? results?.agentsData?.total
+            );
+            if (reportedTotalAgents !== null) {
+                maxReportedTotalAgents = Math.max(maxReportedTotalAgents, reportedTotalAgents);
+            }
 
-            const listingAgent = userData?.listingAgent;
-            const agentId = userData?.agentId || listingAgent?.agentId;
-            if (!listingAgent || !agentId) return;
-            if (pushedAgentIds.has(String(agentId))) return;
+            if (pageNumber === 1) {
+                const sidebarLinks = extractSidebarEstateAgentLinks(results, currentUrl);
+                if (shouldExpandSearchSeed({ totalAgents: reportedTotalAgents, sidebarLinks, depth: seed.depth, maxResults })) {
+                    let enqueuedChildren = 0;
+                    for (const childUrl of sidebarLinks) {
+                        const normalizedChildUrl = normalizeSearchSeedUrl(childUrl);
+                        if (visitedSearchSeeds.has(normalizedChildUrl) || queuedSearchSeeds.has(normalizedChildUrl)) continue;
 
-            const finalAgent = pruneNullishDeep({
-                ...listingAgent,
-                scrapedAt: new Date().toISOString(),
-                extractionMethod: "next-data",
-            });
+                        searchSeedQueue.push({
+                            url: normalizedChildUrl,
+                            depth: seed.depth + 1,
+                            referer: currentUrl,
+                        });
+                        queuedSearchSeeds.add(normalizedChildUrl);
+                        enqueuedChildren += 1;
+                    }
 
-            pushedAgentIds.add(String(agentId));
-            await Dataset.pushData(finalAgent);
-            log.warning(`Pushed 1 agent (profile failed; total ${pushedAgentIds.size})`);
-        },
-    });
+                    if (enqueuedChildren > 0) {
+                        expandedSeedCount += 1;
+                        log.info(`Expanded ${currentUrl} into ${enqueuedChildren} child search seeds`);
+                    }
+                }
+            }
 
-    await crawler.addRequests([
-        {
-            url: searchUrl,
-            userData: { type: "SEARCH", pageNumber: 1 },
-            headers: { ...STEALTHY_HEADERS, "User-Agent": getRandomUserAgent() },
-        },
-    ]);
+            if (!rawAgents.length) {
+                log.info(`No agents found in structured page data for ${currentUrl}`);
+                lastStopReason = "results_exhausted";
+                break;
+            }
 
-    await crawler.run();
+            let newAgentsFound = 0;
+            const listingAgents = [];
+            for (const raw of rawAgents) {
+                if (hasReachedLimit(agentsScraped, maxResults)) break;
 
-    if (agentDataBatch.length > 0) {
-        const toPush = agentDataBatch.splice(0, agentDataBatch.length);
-        await Dataset.pushData(toPush);
-        log.warning(`Pushed ${toPush.length} agents (total ${pushedAgentIds.size})`);
+                const listingAgent = normalizeSearchAgent(raw, branchType);
+                if (!listingAgent?.agentId || !listingAgent?.url) continue;
+                if (agentIds.has(listingAgent.agentId)) continue;
+
+                agentIds.add(listingAgent.agentId);
+                agentsScraped += 1;
+                newAgentsFound += 1;
+                listingAgents.push(listingAgent);
+            }
+
+            await processLeafPageRecords(listingAgents, currentUrl);
+
+            if (
+                pagesWithinSeed >= MAX_SEARCH_PAGES_PER_SEED
+                || hasReachedLimit(agentsScraped, maxResults)
+            ) {
+                lastStopReason = hasReachedLimit(agentsScraped, maxResults) ? "target_reached" : "seed_page_limit_reached";
+                break;
+            }
+
+            if (!hasNextSearchPage({ pagination, rawAgents, pageNumber, maxPages, newAgentsFound })) {
+                if (hasReachedLimit(pageNumber, maxPages)) lastStopReason = "max_pages_reached";
+                else if (newAgentsFound === 0 && pageNumber > 1) {
+                    repeatedLastPageDetected = true;
+                    lastStopReason = "repeated_last_page";
+                } else {
+                    lastStopReason = "results_exhausted";
+                }
+                break;
+            }
+
+            const urlObj = new URL(currentUrl);
+            const currentIndex = parseInt(urlObj.searchParams.get("index") || "0", 10) || 0;
+            const indexFirstAgent = pagination?.indexFirstAgent ?? null;
+            const indexLastAgent = pagination?.indexLastAgent ?? null;
+            const inferredPageSize =
+                typeof indexFirstAgent === "number" && typeof indexLastAgent === "number"
+                    ? Math.max(1, indexLastAgent - indexFirstAgent + 1)
+                    : null;
+            const pageSize = inferredPageSize || (rawAgents.length || DEFAULT_AGENTS_PER_PAGE);
+            const nextIndex = currentIndex + pageSize;
+
+            currentReferer = currentUrl;
+            urlObj.searchParams.set("index", String(nextIndex));
+            currentUrl = urlObj.toString();
+            pageNumber += 1;
+        }
     }
 
-    log.warning("Completed");
-    log.warning(`Agents targeted: ${agentsScraped}, Unique: ${agentIds.size}, Search pages: ${searchPagesProcessed}, Pushed: ${pushedAgentIds.size}`);
+    if (agentDataBatch.length > 0) {
+        await flushAgentDataBatch(agentDataBatch, {
+            force: true,
+            onFlush: async (toPush) => {
+                flushedBatchCount += 1;
+                log.info(`Pushed batch ${flushedBatchCount}: ${toPush.length} agents`);
+            },
+        });
+    }
+
+    if (hasReachedLimit(agentsScraped, maxResults)) {
+        lastStopReason = "target_reached";
+    } else if (repeatedLastPageDetected && maxReportedTotalAgents > pushedAgentIds.size) {
+        lastStopReason = "repeated_last_page";
+    }
+
+    const completionNote =
+        repeatedLastPageDetected && maxReportedTotalAgents > pushedAgentIds.size
+            ? ` Search pagination repeated the last accessible page after ${pushedAgentIds.size} agents while reporting ${maxReportedTotalAgents} total.`
+            : "";
+
+    log.info("Completed");
+    log.info(
+        `Agents targeted: ${agentsScraped}, Unique: ${agentIds.size}, Search pages: ${searchPagesProcessed}, Expanded seeds: ${expandedSeedCount}, Pushed: ${pushedAgentIds.size}, Batches: ${flushedBatchCount}, Stop reason: ${lastStopReason}.${completionNote}`
+    );
 
     await Actor.setValue("OUTPUT", {
         status: "success",
         agentsTargeted: agentsScraped,
         uniqueAgents: agentIds.size,
         searchPagesProcessed,
+        expandedSeeds: expandedSeedCount,
         pushed: pushedAgentIds.size,
+        reportedTotalAgents: maxReportedTotalAgents || null,
+        stopReason: lastStopReason,
+        repeatedLastPageDetected,
         completedAt: new Date().toISOString(),
     });
 } catch (error) {

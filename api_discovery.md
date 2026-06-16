@@ -1,44 +1,106 @@
 # API Discovery: Rightmove Agent Scraper
 
-This document outlines the structured data discovery process used by the Rightmove Agent Scraper to ensure high-performance and resilient data extraction.
+This actor no longer depends on brittle HTML selectors for its primary extraction. It resolves search targets through Rightmove's own location service where possible, then reads structured Next.js state from the response payload.
 
-## Data Source Identification
+## Sources Evaluated
 
-The scraper leverages Rightmove's modern frontend architecture (Next.js) to access structured JSON data directly from the page source, avoiding the fragility of traditional CSS selectors.
+### 1. Public page HTML
 
-### Primary Data Source: `__NEXT_DATA__`
+The search and profile pages are server-rendered and include a populated `__NEXT_DATA__` script. That state contains:
 
-Rightmove embeds its application state within a `<script>` tag identified by `id="__NEXT_DATA__"`. This JSON blob contains the complete, hydrated state of the page, including:
+- search results
+- pagination metadata
+- sidebar location links
+- profile details for agent pages
 
-- **Agent Lists**: Comprehensive branch details, contact info, and branding assets.
-- **Pagination**: Structured metadata for navigating multiple pages of results.
-- **Profile Details**: Deep branch descriptions, industry affiliations, and service offerings.
+This is the actor's main extraction source.
 
-## Extraction Logic & Resilience
+### 2. Rightmove typeahead API
 
-The Actor uses a discovery-first approach to locate data within the deeply nested JSON structure.
+Confirmed working endpoint:
 
-### Robust Path Resolution
+```text
+https://los.rightmove.co.uk/typeahead?query=LONDON&limit=10&exclude=STREET
+```
 
-Instead of relying on hardcoded paths that break when Rightmove updates their UI, the Actor implements a recursive search pattern (`findDeepObject`) to locate key data entities:
+This endpoint is used only to resolve user-supplied locations into Rightmove identifiers such as `REGION^87490`. It is not a full agent-results API.
 
-- **Agent Profiles**: Identified by the presence of `branchId`, `branchName`, and `branchAddress`.
-- **Search Results**: Dynamically located within the `pageProps` hierarchy.
+### 3. Client-side bundles and network traffic
 
-### Automatic Endpoint Fallbacks
+Rightmove bundles and browser traffic were checked for a richer public JSON endpoint for agent listings. No stable public endpoint was found that exposes the full estate-agent results beyond what is present in page state.
 
-The scraper is designed to handle various response structures:
-1. **Direct Path**: Tries known high-priority paths in the Next.js state.
-2. **Deep Search**: Performs a structural scan if direct paths are moved or renamed.
-3. **Hybrid Extraction**: Merges listing data with full profile details when enrichment is enabled.
+### 4. URLScan
 
-## API-First Performance
+URLScan discovery could not be relied on during this update because public submission required authentication at the time of testing.
 
-By targeting the structured state directly:
-- **Speed**: Extraction happens instantly after the HTML is received, without waiting for complex DOM parsing or rendering.
-- **Accuracy**: Data is retrieved in its raw, typed format (Strings, Booleans, Objects) directly from the source.
-- **Stability**: The Actor is resistant to visual changes, CSS class renames, or layout shifts.
+## Selected Extraction Strategy
 
-## Maintenance & Updates
+### Search pages
 
-The discovery process is monitored for structural shifts. If Rightmove significantly alters the `__NEXT_DATA__` schema, the Actor's deep-search logic acts as an "auto-healing" mechanism to maintain data continuity.
+The actor fetches the search page with `gotScraping` and browser-like same-origin headers, then reads:
+
+```text
+props.pageProps.data.results
+```
+
+From that object it extracts:
+
+- `agentsData.agents`
+- pagination fields such as `total`, `totalPages`, `indexLastAgent`
+- sidebar region links for recursive expansion attempts on capped aggregate pages
+
+### Profile pages
+
+When `enrichProfiles` is enabled, the actor fetches each agent profile and reads:
+
+```text
+data.branchProfileResponse.agentProfileResponse
+```
+
+Important fields available there include:
+
+- branch address and postcode
+- sales and lettings telephones
+- branch and company names
+- branch summary and descriptions
+- logo and map image URLs
+- industry affiliations
+- products info
+- testimonials
+
+## Header Strategy
+
+Requests keep `got-scraping` header generation enabled and add browser-like same-origin values on top, including:
+
+- `Origin: https://www.rightmove.co.uk`
+- `Referer` set to the current Rightmove page
+- document-style `Accept`
+- `Sec-Fetch-*`
+- `Upgrade-Insecure-Requests`
+- cache-control headers
+
+This keeps the request profile close to a normal in-site navigation without replacing `got-scraping`'s dynamic header generation.
+
+## Duplicate and Missing-Data Handling
+
+- Search-page duplicates are merged before output when the same branch appears more than once in sales/lettings variants.
+- Final dataset writes are deduped by `agentId`.
+- Null and empty values are pruned from nested payloads.
+- `branchAddress` is reliably populated only when `enrichProfiles` is enabled, because Rightmove does not consistently expose it on list pages.
+
+Validation from local test runs:
+
+- enriched run: `20` records, `0` duplicates, `0` missing required fields
+- large non-enriched London run: `2222` records, `0` duplicates, address omitted on list-only output as expected
+
+## Confirmed Limitation
+
+The aggregate route:
+
+```text
+https://www.rightmove.co.uk/estate-agents/London.html
+```
+
+reports roughly `4563` total agents, but after about `1000` results the site repeats the last accessible page instead of exposing unique page 51+ data. Recursive expansion through `Within London` and `Within South London` links was implemented and tested, but those child pages did not reveal additional unique agents beyond the first accessible aggregate set.
+
+As of testing on June 16, 2026, collecting the full `4563` from that aggregate route would require a different Rightmove data source than the currently exposed page-state route.

@@ -1,187 +1,128 @@
 # Rightmove Agent Scraper
 
-Extract comprehensive estate agent and letting agent data from Rightmove with ease. Collect branch contact details, addresses, brand information, and professional descriptions at scale. Perfect for real estate lead generation, market research, and competitive analysis.
+Collect estate-agent and letting-agent data from Rightmove with structured output that is usable for lead generation, market research, and branch discovery.
 
----
+## What It Extracts
 
-## Features
+- agent and branch names
+- profile URLs
+- main, sales, and lettings phone numbers when available
+- brand and logo information
+- branch summaries and descriptions
+- profile-level branch address and postcode when `enrichProfiles` is enabled
+- company and branch metadata from profile pages
 
-- **Agent and branch discovery** — Find professional agents across any UK location or postcode
-- **Profile enrichment** — Collect deep branch and company information from individual agent pages
-- **Contact details** — Capture verified phone numbers and branch addresses for direct outreach
-- **Structured branding** — Extract agent logos, brand names, and company descriptions automatically
-- **High-speed extraction** — Optimized data collection using structural page state for maximum reliability
+## How It Works
 
----
+The actor resolves locations with Rightmove's own typeahead service when needed, fetches search pages with browser-like same-origin headers, and extracts structured data from the embedded page state instead of relying on fragile visual selectors.
 
-## Use Cases
+When profile enrichment is enabled, it visits each branch profile and merges the richer profile payload into the output record.
 
-### Lead Generation
-Build high-quality agent databases for outreach, strategic partnerships, and marketing campaigns.
-
-### Market Intelligence
-Compare coverage, brand positioning, and branch density across different UK regions.
-
-### Competitive Analysis
-Track competitor activity in specific locations and understand how they present their services to the market.
-
-### Data Enrichment
-Enhance existing business directories with up-to-date branch details, logos, and contact information.
-
----
-
-## Input Parameters
+## Input
 
 | Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `startUrl` | String | No | — | Direct Rightmove search URL to start scraping from. |
-| `searchLocation` | String | No | `"London"` | Location name to search for estate agents. |
-| `maxResults` | Integer | No | `20` | Maximum number of agents to collect (up to 500). |
-| `maxPages` | Integer | No | `1` | Maximum number of result pages to process. |
-| `enrichProfiles` | Boolean | No | `false` | Enable to collect deeper details from individual profile pages. |
-| `proxyConfiguration` | Object | No | `{ "useApifyProxy": false }` | Proxy settings for improved reliability. |
+| --- | --- | --- | --- | --- |
+| `startUrl` | String | No | `null` | Direct Rightmove estate-agent URL to scrape. |
+| `searchLocation` | String | No | `null` | Human-readable location such as `London` or `Manchester`. |
+| `locationIdentifier` | String | No | `null` | Explicit Rightmove location identifier such as `REGION^87490`. |
+| `radius` | String | No | `0.0` | Search radius passed to Rightmove's `find.html` route. |
+| `brandName` | String | No | `""` | Optional brand filter for `find.html` searches. |
+| `branchType` | String | No | `ALL` | `ALL`, `SALES`, or `LETTINGS`. |
+| `maxResults` | Integer | No | `null` | User-priority target for the number of unique agents to collect. |
+| `maxPages` | Integer | No | `null` | User-priority cap for processed result pages. |
+| `enrichProfiles` | Boolean | No | `false` | Fetch profile pages to add address and deeper branch/company data. |
+| `proxyConfiguration` | Object | No | `null` | Optional Apify proxy configuration. |
 
----
+## Output
 
-## Output Data
+Core fields:
 
-Each item in the dataset contains structured information:
+- `agentId`
+- `name`
+- `url`
+- `phone`
+- `phoneSales`
+- `phoneLettings`
+- `logo`
+- `branchType`
+- `brandName`
+- `branchSummary`
+- `description`
+- `scrapedAt`
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `agentId` | String | Unique identifier for the agent branch. |
-| `name` | String | Display name of the agent or branch. |
-| `url` | String | Direct URL to the agent's profile. |
-| `phone` | String | Primary contact telephone number. |
-| `logo` | String | Verified URL to the agent or brand logo. |
-| `branchAddress` | String | Physical address of the branch location. |
-| `branchType` | String | Operation type (SALES, LETTINGS, or ALL). |
-| `description` | String | Professional summary or branch description. |
-| `scrapedAt` | String | ISO timestamp of the data collection. |
+Additional fields when profile enrichment is enabled:
 
----
+- `branchAddress`
+- `branchPostcode`
+- `branchDisplayName`
+- `branchName`
+- `brandTradingName`
+- `branchMainTelephone`
+- `branchLettingsTelephone`
+- `branchLogoUrl`
+- `fullBranchLogoUrl`
+- `brandLogoUrl`
+- `branchStaticMapImageUrl`
+- `companyId`
+- `companyName`
+- `companyTradingName`
+- `companyTypeAlias`
+- `branchSummaryProfile`
+- `branchDescription`
+- `primaryDescription`
+- `lettingsPrimaryDescription`
+- `branchProfileUrl`
+- `lettingsSearchUrl`
+- `industryAffiliations`
+- `productsInfo`
+- `testimonials`
+- `agentProfile`
 
-## Usage Examples
+## Example Input
 
-### Basic Location Search
-
-Extract agents in a specific city with default settings:
+Basic location search:
 
 ```json
 {
   "searchLocation": "Manchester",
-  "maxResults": 50
+  "maxResults": 100
 }
 ```
 
-### Direct URL Extraction
-
-Use a specific Rightmove search URL to target precise results:
+Direct aggregate page:
 
 ```json
 {
-  "startUrl": "https://www.rightmove.co.uk/estate-agents/find.html?locationIdentifier=REGION%5E87490&branchType=ALL",
-  "maxResults": 100,
-  "maxPages": 5
+  "startUrl": "https://www.rightmove.co.uk/estate-agents/London.html",
+  "maxResults": 5000,
+  "maxPages": 500
 }
 ```
 
-### Deep Profile Enrichment
-
-Collect detailed descriptions and additional metadata from every agent page:
+Profile enrichment:
 
 ```json
 {
   "searchLocation": "London",
+  "maxResults": 50,
   "enrichProfiles": true,
-  "maxResults": 20,
   "proxyConfiguration": {
     "useApifyProxy": true
   }
 }
 ```
 
----
+## Notes
 
-## Sample Output
+- User input takes priority over internal defaults for `maxResults` and `maxPages`.
+- Records are deduped by `agentId` before they are written to the dataset.
+- Search-only runs are faster, but Rightmove often omits branch address data on listing pages, so address completeness is best when `enrichProfiles` is enabled.
+- Some aggregate routes on Rightmove report totals that exceed the unique pages the site actually exposes. When Rightmove starts repeating the last accessible page, the actor stops and reports that condition in `OUTPUT`.
 
-```json
-{
-  "agentId": "181787",
-  "name": "1 Ability Estate Agents, London",
-  "url": "https://www.rightmove.co.uk/estate-agents/agent/1-Ability-Estate-Agents/London-181787.html",
-  "phone": "020 3903 2323",
-  "logo": "https://media.rightmove.co.uk/partner-logo/19103090-LOGO-1765975389.png",
-  "branchType": "LETTINGS",
-  "brandName": "1 Ability Estate Agents",
-  "branchSummary": "1 Ability estate agents are an independent estate agency based in the heart of London Bridge SE1...",
-  "scrapedAt": "2026-05-06T13:32:13.999Z"
-}
-```
+## Validation Snapshot
 
----
+Local validation after the API/state update:
 
-## Tips for Best Results
-
-### Start with Small Runs
-- Use `maxResults: 20` to verify your search location produces the expected results.
-- Test with `enrichProfiles: false` first to check the speed and data density.
-
-### Optimize Reliability
-- Use residential proxies for larger crawls to ensure consistent data extraction.
-- Provide a specific `startUrl` from Rightmove to apply advanced filters like radius or price range.
-
-### Performance Tuning
-- Disable `enrichProfiles` if you only need names and phone numbers to significantly increase speed.
-
----
-
-## Integrations
-
-Connect your estate agent data with:
-
-- **Google Sheets** — Export directly for analysis and reporting
-- **Airtable** — Build searchable agent directories and CRMs
-- **Slack** — Get real-time notifications for new data runs
-- **Webhooks** — Send data to your custom endpoints and APIs
-- **Make / Zapier** — Automate outreach and lead nurturing workflows
-
-### Export Formats
-
-- **JSON** — For developers and system integrations
-- **CSV / Excel** — For spreadsheet analysis and manual review
-- **XML / RSS** — For legacy system compatibility
-
----
-
-## Frequently Asked Questions
-
-### Can I filter by radius or brand?
-Yes, simply perform the search on Rightmove with your desired filters and paste the resulting URL into the `startUrl` field.
-
-### How many agents can I collect?
-The Actor supports collecting up to 500 agents per run, but results are limited by what is available on Rightmove for the given location.
-
-### Does it work with residential postcodes?
-Yes, you can enter postcodes into the `searchLocation` field just like city names.
-
-### Is the data collected in real-time?
-Yes, the scraper fetches the most current data available on Rightmove at the moment of the run.
-
----
-
-## Support
-
-For issues or feature requests, contact support through the Apify Console.
-
-### Resources
-
-- [Apify Documentation](https://docs.apify.com/)
-- [API Reference](https://docs.apify.com/api/v2)
-- [Scheduling Runs](https://docs.apify.com/schedules)
-
----
-
-## Legal Notice
-
-This Actor is designed for legitimate data collection purposes. Users are responsible for ensuring compliance with website terms of service and applicable laws. Use data responsibly and respect rate limits.
+- enriched validation run: `20` records, `0` duplicates, `0` missing core fields
+- large `find.html` London run: `2222` unique records, `0` duplicates
+- aggregate `London.html` run: site reported `4563`, but only `1000` unique accessible records were exposed before pagination repeated
