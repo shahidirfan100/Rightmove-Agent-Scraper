@@ -82,6 +82,12 @@ const cleanText = (text) => {
     return cleaned.length > 0 ? cleaned : null;
 };
 
+const parseOptionalPositiveInteger = (value) => {
+    if (value === null || value === undefined || value === "") return null;
+    const parsed = Number.parseInt(String(value), 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
 const pruneNullishDeep = (value) => {
     if (value === null || value === undefined) return undefined;
     if (Array.isArray(value)) {
@@ -447,6 +453,35 @@ const normalizeSearchAgent = (item, inputBranchType = "ALL") => {
     };
 };
 
+const hasReachedLimit = (count, limit) => limit !== null && count >= limit;
+
+const hasNextSearchPage = ({ pagination, rawAgents, pageNumber, maxPages, newAgentsFound }) => {
+    if (hasReachedLimit(pageNumber, maxPages)) return false;
+    if (!Array.isArray(rawAgents) || rawAgents.length === 0) return false;
+    if (newAgentsFound === 0) return false;
+
+    const nextPageUrl = pagination?.nextPageUrl || pagination?.next || pagination?.nextLink || null;
+    if (nextPageUrl) return true;
+
+    const hasNextPageFlag = pagination?.hasNextPage;
+    if (typeof hasNextPageFlag === "boolean") return hasNextPageFlag;
+
+    const totalPages = parseOptionalPositiveInteger(
+        pagination?.totalPages ?? pagination?.pageCount ?? pagination?.numberOfPages
+    );
+    const currentPage =
+        parseOptionalPositiveInteger(pagination?.currentPage ?? pagination?.pageNumber ?? pagination?.page) || pageNumber;
+    if (totalPages !== null) return currentPage < totalPages;
+
+    const indexLastAgent = parseOptionalPositiveInteger(pagination?.indexLastAgent);
+    const totalAgents = parseOptionalPositiveInteger(
+        pagination?.totalAgents ?? pagination?.numberOfAgents ?? pagination?.totalResults ?? pagination?.totalCount
+    );
+    if (indexLastAgent !== null && totalAgents !== null) return indexLastAgent < totalAgents;
+
+    return rawAgents.length >= DEFAULT_AGENTS_PER_PAGE;
+};
+
 
 
 // ============================================================================
@@ -463,18 +498,20 @@ try {
         radius = "0.0",
         brandName = "",
         branchType = "ALL",
-        maxResults = 20,
-        maxPages = 1,
+        maxResults: inputMaxResults = null,
+        maxPages: inputMaxPages = null,
         startUrl = null,
         enrichProfiles = false,
     } = input;
+    const maxResults = parseOptionalPositiveInteger(inputMaxResults);
+    const maxPages = parseOptionalPositiveInteger(inputMaxPages);
 
     const searchUrl = buildSearchUrl({ startUrl, searchLocation, locationIdentifier, radius, brandName, branchType });
 
     log.warning("Starting Rightmove Agent Scraper");
     log.warning(`Search URL: ${searchUrl}`);
     log.warning(
-        `Config: maxResults=${maxResults}, maxPages=${maxPages}, branchType=${branchType || "ALL"}, enrichProfiles=${enrichProfiles}`
+        `Config: maxResults=${maxResults ?? "unbounded"}, maxPages=${maxPages ?? "unbounded"}, branchType=${branchType || "ALL"}, enrichProfiles=${enrichProfiles}`
     );
 
     let agentsScraped = 0;
@@ -510,8 +547,9 @@ try {
                         log.warning("  ⚠ No agents found in structured page data (blocked or markup changed)");
                     }
 
+                    let newAgentsFound = 0;
                     for (const raw of rawAgents) {
-                        if (agentsScraped >= maxResults) break;
+                        if (hasReachedLimit(agentsScraped, maxResults)) break;
 
                         const listingAgent = normalizeSearchAgent(raw, branchType);
                         if (!listingAgent?.agentId || !listingAgent?.url) continue;
@@ -519,6 +557,7 @@ try {
                         if (agentIds.has(listingAgent.agentId)) continue;
                         agentIds.add(listingAgent.agentId);
                         agentsScraped += 1;
+                        newAgentsFound += 1;
 
                         if (!enrichProfiles) {
                             const finalAgent = pruneNullishDeep({
@@ -551,7 +590,10 @@ try {
 
                     // Handle pagination (search pages only)
                     const pageNumber = userData?.pageNumber || 1;
-                    if (agentsScraped < maxResults && pageNumber < maxPages) {
+                    if (
+                        !hasReachedLimit(agentsScraped, maxResults)
+                        && hasNextSearchPage({ pagination, rawAgents, pageNumber, maxPages, newAgentsFound })
+                    ) {
                         const urlObj = new URL(url);
                         const currentIndex = parseInt(urlObj.searchParams.get("index") || "0", 10) || 0;
 
