@@ -153,10 +153,25 @@ Collect deeper business details for each agent profile:
 - Search-only runs are faster and lighter
 - Turn on `enrichProfiles` when you need branch addresses, postcode details, and deeper company information
 
-### Scale With Proxies
+### Use Proxies for Larger Runs
 
 - Larger runs are more reliable with proxy support enabled
-- Residential proxies are a better choice when you expect long result sets
+- Residential proxies are recommended when you expect long result sets
+
+### Proxy Configuration
+
+Enable Apify Proxy in the input:
+
+```json
+{
+  "searchLocation": "Birmingham",
+  "maxResults": 500,
+  "enrichProfiles": true,
+  "proxyConfiguration": {
+    "useApifyProxy": true
+  }
+}
+```
 
 ---
 
@@ -184,27 +199,27 @@ Connect your data with:
 
 ### How many agents can I collect?
 
-You can collect as many unique agents as Rightmove exposes for the chosen search. The final count depends on the location, filters, and how many distinct pages the site makes available.
+There is no hard limit. You can collect as many unique agents as Rightmove exposes for the chosen search location. The final count depends on the location, filters, and how many distinct pages the site makes available.
 
 ### Can I use a direct Rightmove result page instead of a location name?
 
-Yes. Put the full Rightmove search URL into `startUrl` and the actor will scrape that result set directly.
+Yes. Paste the full Rightmove search URL into `startUrl` and the actor will scrape that result set directly without needing a location name.
 
 ### What is the difference between search-only and enriched runs?
 
-Search-only runs are faster and collect the core listing data. Enriched runs also visit individual agent pages to gather deeper branch and company details.
+Search-only runs are faster and collect the core listing data (name, phone, branch type, brand). Enriched runs also visit individual agent pages to gather deeper details like addresses, postcodes, descriptions, and company information.
 
 ### Why are some fields empty?
 
-Some agents simply do not expose every detail on Rightmove. Empty fields usually mean the source page did not provide that data for the specific branch.
+Empty fields mean the source page did not provide that data for a specific branch. Rightmove does not expose every detail for every agent, so some fields may be missing.
 
 ### Does the actor remove duplicates?
 
-Yes. The actor writes unique records only, which helps avoid repeated branches when result pages overlap or the source route shows the same agent more than once.
+Yes. The actor writes unique records only, preventing repeated branches when result pages overlap or the search route shows the same agent more than once.
 
 ### Why can a location show a higher total than the final dataset?
 
-Some Rightmove area pages display a large headline total but stop exposing new unique pages after a certain point. In those cases, the actor continues until no new accessible records remain and reports that condition in the run output.
+Some Rightmove area pages show a large headline total but stop exposing new unique pages after a certain point. The actor continues until no new accessible records remain and reports that condition in the run output.
 
 ---
 

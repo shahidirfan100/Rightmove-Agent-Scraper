@@ -1,6 +1,6 @@
 import { Actor, log } from "apify";
 import { Dataset } from "crawlee";
-import { gotScraping } from "got-scraping";
+import { Impit } from "impit";
 
 log.setLevel(log.LEVELS.INFO);
 
@@ -26,33 +26,14 @@ const UK_REGIONS = {
     belfast: "REGION^5882",
 };
 
-const RIGHTMOVE_NAVIGATION_HEADERS = {
-    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "Cache-Control": "max-age=0",
-    Pragma: "no-cache",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "same-origin",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-};
-
-const RIGHTMOVE_HEADER_GENERATOR_OPTIONS = {
-    browsers: [
-        { name: "chrome", minVersion: 122, maxVersion: 126 },
-        { name: "firefox", minVersion: 123, maxVersion: 127 },
-    ],
-    devices: ["desktop"],
-    locales: ["en-GB", "en-US"],
-    operatingSystems: ["windows", "macos", "linux"],
-};
-
 const DEFAULT_AGENTS_PER_PAGE = 20;
 const DATASET_BATCH_SIZE = DEFAULT_AGENTS_PER_PAGE;
 const TIMEOUT_SECONDS = 60;
 const PROFILE_CONCURRENCY = 8;
 const MAX_EXPANSION_DEPTH = 4;
 const MAX_SEARCH_PAGES_PER_SEED = 250;
+
+let client;
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -151,50 +132,27 @@ const ensureAbsoluteUrl = (url) => {
 const normalizeReferer = (url) => ensureAbsoluteUrl(url) || RIGHTMOVE_HOME_URL;
 
 const buildRightmoveRequestHeaders = ({ referer }) => ({
-    ...RIGHTMOVE_NAVIGATION_HEADERS,
     Origin: BASE_URL,
     Referer: normalizeReferer(referer),
 });
 
-const getProxyUrl = async (proxyConfig) => {
-    if (!proxyConfig) return undefined;
-    return proxyConfig.newUrl();
-};
-
-const fetchText = async ({ url, proxyConfig, referer = RIGHTMOVE_HOME_URL, accept = RIGHTMOVE_NAVIGATION_HEADERS.Accept }) => {
-    const proxyUrl = await getProxyUrl(proxyConfig);
-    const response = await gotScraping({
-        url,
-        proxyUrl,
-        responseType: "text",
-        timeout: { request: TIMEOUT_SECONDS * 1000 },
-        retry: { limit: 0 },
-        headerGeneratorOptions: RIGHTMOVE_HEADER_GENERATOR_OPTIONS,
-        headers: {
-            ...buildRightmoveRequestHeaders({ referer }),
-            Accept: accept,
-        },
+const fetchText = async ({ url, referer = RIGHTMOVE_HOME_URL }) => {
+    const response = await client.fetch(url, {
+        headers: buildRightmoveRequestHeaders({ referer }),
+        signal: AbortSignal.timeout(TIMEOUT_SECONDS * 1000),
     });
-
-    return response.body;
+    return response.text();
 };
 
-const fetchJson = async ({ url, proxyConfig, referer = RIGHTMOVE_HOME_URL }) => {
-    const proxyUrl = await getProxyUrl(proxyConfig);
-    const response = await gotScraping({
-        url,
-        proxyUrl,
-        responseType: "json",
-        timeout: { request: TIMEOUT_SECONDS * 1000 },
-        retry: { limit: 0 },
-        headerGeneratorOptions: RIGHTMOVE_HEADER_GENERATOR_OPTIONS,
+const fetchJson = async ({ url, referer = RIGHTMOVE_HOME_URL }) => {
+    const response = await client.fetch(url, {
         headers: {
             ...buildRightmoveRequestHeaders({ referer }),
             Accept: "application/json, text/plain, */*",
         },
+        signal: AbortSignal.timeout(TIMEOUT_SECONDS * 1000),
     });
-
-    return response.body;
+    return response.json();
 };
 
 const chunkArray = (items, size) => {
@@ -318,7 +276,7 @@ const sameNormalizedText = (left, right) => {
     return !!a && !!b && a === b;
 };
 
-const resolveLocationIdentifier = async (searchLocation, proxyConfig) => {
+const resolveLocationIdentifier = async (searchLocation) => {
     if (!searchLocation) return null;
 
     const locationKey = searchLocation.toLowerCase().trim();
@@ -330,7 +288,6 @@ const resolveLocationIdentifier = async (searchLocation, proxyConfig) => {
     try {
         const response = await fetchJson({
             url,
-            proxyConfig,
             referer: RIGHTMOVE_HOME_URL,
         });
         const matches = Array.isArray(response?.matches) ? response.matches : [];
@@ -343,14 +300,14 @@ const resolveLocationIdentifier = async (searchLocation, proxyConfig) => {
     }
 };
 
-const buildSearchUrl = async (input, proxyConfig) => {
+const buildSearchUrl = async (input) => {
     if (input.startUrl) return input.startUrl;
     const params = new URLSearchParams();
 
     if (input.locationIdentifier) {
         params.append("locationIdentifier", input.locationIdentifier);
     } else if (input.searchLocation) {
-        const resolvedLocationIdentifier = await resolveLocationIdentifier(input.searchLocation, proxyConfig);
+        const resolvedLocationIdentifier = await resolveLocationIdentifier(input.searchLocation);
         params.append("locationIdentifier", resolvedLocationIdentifier || input.searchLocation);
     } else {
         // Default to London
@@ -596,17 +553,17 @@ const hasNextSearchPage = ({ pagination, rawAgents, pageNumber, maxPages, newAge
     return rawAgents.length >= DEFAULT_AGENTS_PER_PAGE;
 };
 
-const fetchSearchResultsPage = async ({ url, proxyConfig, referer }) => {
-    const html = await fetchText({ url, proxyConfig, referer });
+const fetchSearchResultsPage = async ({ url, referer }) => {
+    const html = await fetchText({ url, referer });
     const { agents, pagination } = extractAgentsFromSearchHtml(html);
     const nextData = extractNextDataFromHtml(html);
     const results = nextData?.props?.pageProps?.data?.results || null;
     return { agents, pagination, results };
 };
 
-const fetchProfileRecord = async ({ listingAgent, proxyConfig, referer }) => {
+const fetchProfileRecord = async ({ listingAgent, referer }) => {
     try {
-        const html = await fetchText({ url: listingAgent.url, proxyConfig, referer });
+        const html = await fetchText({ url: listingAgent.url, referer });
         const apr = extractAgentProfileResponseFromProfileHtml(html);
         const profile = normalizeProfileData(apr);
 
@@ -653,9 +610,15 @@ try {
         ? await Actor.createProxyConfiguration(input.proxyConfiguration)
         : undefined;
 
+    const proxyUrl = proxyConfig ? await proxyConfig.newUrl() : undefined;
+    client = new Impit({
+        browser: "chrome",
+        ignoreTlsErrors: true,
+        ...(proxyUrl && { proxyUrl }),
+    });
+
     const searchUrl = await buildSearchUrl(
-        { startUrl, searchLocation, locationIdentifier, radius, brandName, branchType },
-        proxyConfig
+        { startUrl, searchLocation, locationIdentifier, radius, brandName, branchType }
     );
 
     log.info("Starting Rightmove Agent Scraper");
@@ -716,7 +679,7 @@ try {
 
         for (const chunk of chunkArray(listingAgents, PROFILE_CONCURRENCY)) {
             const enrichedAgents = await Promise.all(
-                chunk.map((listingAgent) => fetchProfileRecord({ listingAgent, proxyConfig, referer }))
+                chunk.map((listingAgent) => fetchProfileRecord({ listingAgent, referer }))
             );
             await bufferAgents(enrichedAgents);
         }
@@ -737,7 +700,6 @@ try {
             try {
                 pageData = await fetchSearchResultsPage({
                     url: currentUrl,
-                    proxyConfig,
                     referer: currentReferer,
                 });
             } catch (error) {
