@@ -18,7 +18,6 @@
       "description": "Location name to search for estate agents (e.g., 'London', 'Manchester', 'Birmingham')",
       "editor": "textfield",
       "example": "London",
-      "prefill": "London",
       "default": "London"
     },
     "maxResults": {

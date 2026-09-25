@@ -29,6 +29,7 @@ const UK_REGIONS = {
 const DEFAULT_AGENTS_PER_PAGE = 20;
 const DATASET_BATCH_SIZE = DEFAULT_AGENTS_PER_PAGE;
 const TIMEOUT_SECONDS = 60;
+const MAX_REQUEST_ATTEMPTS = 3;
 const PROFILE_CONCURRENCY = 8;
 const MAX_EXPANSION_DEPTH = 4;
 const MAX_SEARCH_PAGES_PER_SEED = 250;
@@ -136,21 +137,75 @@ const buildRightmoveRequestHeaders = ({ referer }) => ({
     Referer: normalizeReferer(referer),
 });
 
+const isTemporaryNetworkError = (error) => {
+    const code = error?.code || error?.cause?.code;
+    return (
+        ["AbortError", "TimeoutError"].includes(error?.name)
+        || ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ENETUNREACH", "UND_ERR_SOCKET"].includes(code)
+        || /fetch failed|network error|timed? out|connection reset|socket hang up/i.test(error?.message || "")
+    );
+};
+
+const getRetryDelayMs = (attempt, response) => {
+    const retryAfter = response?.headers?.get("retry-after");
+    if (retryAfter) {
+        const seconds = Number(retryAfter);
+        const retryAt = Date.parse(retryAfter);
+        const retryAfterMs = Number.isFinite(seconds) ? seconds * 1000 : retryAt - Date.now();
+        if (Number.isFinite(retryAfterMs) && retryAfterMs > 0) return Math.min(retryAfterMs, 5000);
+    }
+    return Math.min(1000 * 2 ** (attempt - 1), 5000) + Math.floor(Math.random() * 250);
+};
+
+const fetchResponse = async ({ url, referer, headers }) => {
+    for (let attempt = 1; attempt <= MAX_REQUEST_ATTEMPTS; attempt += 1) {
+        let response;
+        try {
+            response = await client.fetch(url, {
+                headers: {
+                    ...buildRightmoveRequestHeaders({ referer }),
+                    ...headers,
+                },
+                signal: AbortSignal.timeout(TIMEOUT_SECONDS * 1000),
+            });
+        } catch (error) {
+            if (attempt === MAX_REQUEST_ATTEMPTS || !isTemporaryNetworkError(error)) throw error;
+            const delayMs = getRetryDelayMs(attempt);
+            log.warning(`Temporary request failure; retry ${attempt + 1}/${MAX_REQUEST_ATTEMPTS} in ${delayMs}ms`);
+            await new Promise((resolve) => {
+                setTimeout(resolve, delayMs);
+            });
+            continue;
+        }
+
+        if (response?.status >= 200 && response.status < 300) return response;
+        if (response?.status !== 429 && !(response?.status >= 500 && response.status < 600)) {
+            throw new Error(`Rightmove request returned HTTP ${response?.status ?? "unknown"}`);
+        }
+        if (attempt === MAX_REQUEST_ATTEMPTS) {
+            throw new Error(`Rightmove request returned HTTP ${response.status} after ${attempt} attempts`);
+        }
+
+        const delayMs = getRetryDelayMs(attempt, response);
+        log.warning(`Temporary HTTP ${response.status}; retry ${attempt + 1}/${MAX_REQUEST_ATTEMPTS} in ${delayMs}ms`);
+        await new Promise((resolve) => {
+            setTimeout(resolve, delayMs);
+        });
+    }
+
+    throw new Error("Rightmove request failed after exhausting retries");
+};
+
 const fetchText = async ({ url, referer = RIGHTMOVE_HOME_URL }) => {
-    const response = await client.fetch(url, {
-        headers: buildRightmoveRequestHeaders({ referer }),
-        signal: AbortSignal.timeout(TIMEOUT_SECONDS * 1000),
-    });
+    const response = await fetchResponse({ url, referer });
     return response.text();
 };
 
 const fetchJson = async ({ url, referer = RIGHTMOVE_HOME_URL }) => {
-    const response = await client.fetch(url, {
-        headers: {
-            ...buildRightmoveRequestHeaders({ referer }),
-            Accept: "application/json, text/plain, */*",
-        },
-        signal: AbortSignal.timeout(TIMEOUT_SECONDS * 1000),
+    const response = await fetchResponse({
+        url,
+        referer,
+        headers: { Accept: "application/json, text/plain, */*" },
     });
     return response.json();
 };
@@ -210,7 +265,6 @@ const extractAgentId = (url) => {
 const extractNextDataFromHtml = (html) => {
     if (!html) return null;
 
-    // Rightmove uses a Next.js app; we treat the embedded __NEXT_DATA__ JSON as a structured source.
     // Keep regex flexible (attribute order can change).
     const match = html.match(/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/);
     if (!match) return null;
@@ -219,6 +273,44 @@ const extractNextDataFromHtml = (html) => {
         return JSON.parse(match[1]);
     } catch (e) {
         log.debug(`__NEXT_DATA__ parse error: ${e.message}`);
+        return null;
+    }
+};
+
+const extractReactRouterDataFromHtml = (html) => {
+    if (!html) return null;
+
+    const chunks = [...html.matchAll(/window\.__reactRouterContext\.streamController\.enqueue\(("(?:\\.|[^"\\])*")\);/g)];
+    if (chunks.length === 0) return null;
+
+    try {
+        const serializedData = chunks.map(([, chunk]) => JSON.parse(chunk)).join("");
+        const references = JSON.parse(serializedData);
+        if (!Array.isArray(references)) return null;
+
+        const decodeReference = (index, ancestors = new Set()) => {
+            if (typeof index !== "number") return index;
+            if (index < 0 || index >= references.length || ancestors.has(index)) return undefined;
+
+            const value = references[index];
+            const nextAncestors = new Set(ancestors);
+            nextAncestors.add(index);
+
+            if (Array.isArray(value)) return value.map((reference) => decodeReference(reference, nextAncestors));
+            if (value && typeof value === "object") {
+                const decoded = {};
+                for (const [keyReference, valueReference] of Object.entries(value)) {
+                    const key = references[Number.parseInt(keyReference.slice(1), 10)];
+                    if (typeof key === "string") decoded[key] = decodeReference(valueReference, nextAncestors);
+                }
+                return decoded;
+            }
+            return value;
+        };
+
+        return decodeReference(0);
+    } catch (error) {
+        log.debug(`React Router data parse error: ${error.message}`);
         return null;
     }
 };
@@ -342,15 +434,18 @@ const pickTelephoneByType = (telephoneNumbers, targetType) => {
 
 const extractAgentsFromSearchHtml = (html) => {
     const nextData = extractNextDataFromHtml(html);
-    if (!nextData) return { agents: [], pagination: null };
-
-    const agents =
-        nextData?.props?.pageProps?.data?.results?.agentsData?.agents ||
-        nextData?.props?.pageProps?.data?.results?.agents ||
-        [];
+    const nextResults = nextData?.props?.pageProps?.data?.results;
+    const routerData = nextResults ? null : extractReactRouterDataFromHtml(html);
+    const routerResults = Object.values(routerData?.loaderData || {})
+        .map((loaderData) => loaderData?.results)
+        .find((results) => Array.isArray(results?.agentsData?.agents));
+    const results = nextResults || routerResults || null;
+    let agents = [];
+    if (Array.isArray(results?.agentsData?.agents)) agents = results.agentsData.agents;
+    else if (Array.isArray(results?.agents)) agents = results.agents;
     const pagination =
-        nextData?.props?.pageProps?.data?.results?.paginationData ||
-        nextData?.props?.pageProps?.data?.results?.agentsData?.pagination ||
+        results?.paginationData ||
+        results?.agentsData?.pagination ||
         null;
 
     // The search page sometimes returns duplicates per branch (e.g. separate records for sales vs lettings).
@@ -386,7 +481,7 @@ const extractAgentsFromSearchHtml = (html) => {
         }
     }
 
-    return { agents: [...byId.values()], pagination };
+    return { agents: [...byId.values()], pagination, results };
 };
 
 const extractAgentProfileResponseFromProfileHtml = (html) => {
@@ -555,10 +650,7 @@ const hasNextSearchPage = ({ pagination, rawAgents, pageNumber, maxPages, newAge
 
 const fetchSearchResultsPage = async ({ url, referer }) => {
     const html = await fetchText({ url, referer });
-    const { agents, pagination } = extractAgentsFromSearchHtml(html);
-    const nextData = extractNextDataFromHtml(html);
-    const results = nextData?.props?.pageProps?.data?.results || null;
-    return { agents, pagination, results };
+    return extractAgentsFromSearchHtml(html);
 };
 
 const fetchProfileRecord = async ({ listingAgent, referer }) => {
@@ -613,7 +705,6 @@ try {
     const proxyUrl = proxyConfig ? await proxyConfig.newUrl() : undefined;
     client = new Impit({
         browser: "chrome",
-        ignoreTlsErrors: true,
         ...(proxyUrl && { proxyUrl }),
     });
 
@@ -703,7 +794,7 @@ try {
                     referer: currentReferer,
                 });
             } catch (error) {
-                log.info(`Retrying ${currentUrl} after fetch error: ${error.message}`);
+                log.warning(`Search page fetch failed after retries for ${currentUrl}: ${error.message}`);
                 lastStopReason = "search_fetch_failed";
                 break;
             }
@@ -746,6 +837,14 @@ try {
                         log.info(`Expanded ${currentUrl} into ${enqueuedChildren} child search seeds`);
                     }
                 }
+            }
+
+            const hasAgentCollection =
+                Array.isArray(results?.agentsData?.agents) || Array.isArray(results?.agents);
+            if (!hasAgentCollection) {
+                log.warning(`Search response did not contain a recognized agent collection for ${currentUrl}`);
+                lastStopReason = "unexpected_response";
+                break;
             }
 
             if (!rawAgents.length) {
@@ -791,18 +890,14 @@ try {
             }
 
             const urlObj = new URL(currentUrl);
-            const currentIndex = parseInt(urlObj.searchParams.get("index") || "0", 10) || 0;
-            const indexFirstAgent = pagination?.indexFirstAgent ?? null;
-            const indexLastAgent = pagination?.indexLastAgent ?? null;
-            const inferredPageSize =
-                typeof indexFirstAgent === "number" && typeof indexLastAgent === "number"
-                    ? Math.max(1, indexLastAgent - indexFirstAgent + 1)
-                    : null;
-            const pageSize = inferredPageSize || (rawAgents.length || DEFAULT_AGENTS_PER_PAGE);
-            const nextIndex = currentIndex + pageSize;
+            const currentSearchPage =
+                parseOptionalPositiveInteger(pagination?.currentPage)
+                || parseOptionalPositiveInteger(urlObj.searchParams.get("page"))
+                || pageNumber;
 
             currentReferer = currentUrl;
-            urlObj.searchParams.set("index", String(nextIndex));
+            urlObj.searchParams.delete("index");
+            urlObj.searchParams.set("page", String(currentSearchPage + 1));
             currentUrl = urlObj.toString();
             pageNumber += 1;
         }
